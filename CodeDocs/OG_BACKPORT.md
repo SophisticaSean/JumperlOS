@@ -1275,11 +1275,14 @@ probed with `fast_connect("ADC0", r)`. Not the router - `netStruct` is
 `nodes[MAX_NODES]` + `bridges[MAX_NODES][2]` and OG `MAX_NODES` was 24
 (`JumperlessDefines.h`), so GND-1..24 filled the per-net bridge table exactly
 and the probe bridge, added last, was dropped by `addBridgeToNet()` (message
-on Serial only). Raised to 40 (the V5 value, +5.8 KB .bss, RAM 67.9 -> 70.1 %),
-both "net full" messages now print unconditionally, and the router's L-hop
-search accepts a hop chip whose SF lane / Y0 already carry the SAME net (GND
-could not reach a corner once its rows owned the I/J lanes of A..D). Beyond 40
-bridges in one net the extras are still dropped - reported, not silent.
+on Serial only). Raising it to 40 (V5's value, +5.8 KB .bss) was tried and REVERTED: the
+MicroPython heap is carved from what .bss leaves, `gc.mem_free()` fell
+~18000 -> 10784 and on-board scripts died with MemoryError. So 24 stays, both
+"net full (MAX_NODES=24)" messages now print unconditionally, and a net must
+keep under 24 bridges (probe a big net from a row that is already in it, or
+split it). Kept from the same pass: the router's L-hop search accepts a hop
+chip whose SF lane / Y0 already carry the SAME net (GND could not reach a
+corner once its rows owned the I/J lanes of A..D).
 
 **Test:** `test/test_og_router/run.sh` — host build of the real router against
 a crossbar model of the rev 2 wiring; it checks the CLOSED CROSSPOINTS, not

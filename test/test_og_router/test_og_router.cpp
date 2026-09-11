@@ -207,19 +207,28 @@ int main(int argc, char** argv) {
     fails += !runCase("3c: GND-4..11 alone", {g}, verbose); }
   // Bug 4 (2026-09-11, on the fixed firmware): GND on rows 1..N. N <= 20 fine,
   // N = 24 drops EVERY row, N = 60 keeps only row 24.
-  // The bench repro adds the ADC0 probe bridge LAST, so it was the one the
-  // per-net bridge table (MAX_NODES deep, 24 at the time) dropped: GND-1..24
-  // filled it and ADC0 never routed, every row read floating. The router was
-  // fine; the cap was hit one bridge early. Cases: N=24 (+ADC0 = 25 bridges,
-  // the bench failure), N=MAX_NODES-1 (+ADC0 = exactly full), and N=60 (still
-  // over the cap: the test expects only the tracked bridges to route, and the
-  // NOTE lines make the drop visible).
-  for (int n : {20, 24, MAX_NODES - 1, MAX_NODES, 60}) {
+  // Bench repro: GND on rows 1..N, then the ADC0 probe bridge added LAST.
+  // netStruct.bridges[] is MAX_NODES (24) deep per net, so at N=24 the probe is
+  // the 25th bridge and NetManager drops it (now reported on Serial) - every
+  // row then reads floating because ADC0 never routes. That is a documented
+  // limit, not a router bug (raising MAX_NODES starved the MicroPython heap),
+  // so the harness mirrors the drop: the NOTE line shows it and only the
+  // tracked bridges are expected to route. N=23 (+probe = exactly full) must
+  // route the probe; N=40/60 exercise a corner (31) reached through lanes the
+  // net already owns (the L-hop same-net fix).
+  for (int n : {20, MAX_NODES - 1, MAX_NODES, 40, 60}) {
     NetDef g{1, {GND}, {}}; for (int r = 1; r <= n; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
     g.nodes.push_back(ADC0); g.bridges.push_back({ADC0, n < 12 ? n : 12});
     char t[64]; snprintf(t, sizeof t, "4: GND-1..%d + ADC0-12 probe last", n);
     fails += !runCase(t, {g}, verbose);
   }
+  // Corner reached only through lanes the same net already owns: two GND rows
+  // on EVERY breadboard chip take both its I and J lanes (17 bridges, under
+  // the cap), so 31 can only hop through a lane GND already holds. The L-hop
+  // search used to demand a virgin lane and gave up.
+  { NetDef g{1, {GND}, {}}; for (int r : {2, 3, 9, 10, 16, 17, 23, 24, 33, 34, 40, 41, 47, 48, 54, 55}) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
+    g.nodes.push_back(31); g.bridges.push_back({GND, 31});
+    fails += !runCase("5: GND on 2 rows of every chip + 31 (corner via same-net lanes)", {g}, verbose); }
   // sanity: the thing that works on hardware
   fails += !runCase("S: 3V3-5 + 5-1 (works on hw)", {{6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
   printf("\n%d failing cases\n", fails);

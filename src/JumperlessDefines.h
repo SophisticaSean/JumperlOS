@@ -196,14 +196,15 @@ extern int probeRev;
 // AND every copy of it, both to free heap and to keep state copies survivable.
 // MAX_NETS stays 60 (netNameConstants[] must carry one initializer per net).
 // MAX_NODES is also the per-net BRIDGE cap (netStruct.bridges[MAX_NODES][2]).
-// At 24 a GND net on rows 1..24 filled it exactly, and the NEXT bridge on that
-// net - e.g. the ADC0 probe of one of those rows - was silently dropped from
-// the net table, so it never routed (2026-09-11, rev 2 bench). 40 = the V5
-// value; on the OG it costs 16 * 6 B * MAX_NETS ~= 5.8 KB of .bss with the
-// single static globalState (the state copies this comment mentions are gone).
+// A GND net on rows 1..24 fills it exactly and the NEXT bridge on that net
+// (e.g. the ADC0 probe of one of those rows) is dropped - NetManager now says
+// so on Serial ("net full (MAX_NODES=24)"). It cannot be raised on the OG:
+// 40 cost 5.8 KB of .bss and the MicroPython heap is carved from what .bss
+// leaves - gc.mem_free() fell ~18000 -> 10784 and scripts died with
+// MemoryError (bench 2026-09-11). 24 stays; big nets must stay under 24 bridges.
 #if defined(OG_JUMPERLESS)
 #define MAX_BRIDGES 72
-#define MAX_NODES 40 //this is the max number of nodes that can be connected to a net
+#define MAX_NODES 24 //this is the max number of nodes that can be connected to a net
 #else
 #define MAX_BRIDGES 128
 #define MAX_NODES 40 //this is the max number of nodes that can be connected to a net
