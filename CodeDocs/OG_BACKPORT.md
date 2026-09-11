@@ -1267,6 +1267,20 @@ wire each; L X8/X9/X10/X11 = rows 1/30/32(b1)/61(b30); A X0/X1/X9 = `AI`/`AJ`/
 `AK` = I/J/K Y0; BB lanes pair lane0<->lane0 (A X2 `AB0` <-> B X0 `AB0`). That
 matches `board_og.cpp` exactly, so the descriptor tables were never the bug.
 
+**Bench-verified by Kevin's coordinator (2026-09-11): four corner LEDs lit at
+once, 3V3-to-row-3 beside GND on 4-11 / 24-31 / all other 59 rows.**
+
+Follow-up, same day: a GND net on rows 1..24 read floating on EVERY row when
+probed with `fast_connect("ADC0", r)`. Not the router - `netStruct` is
+`nodes[MAX_NODES]` + `bridges[MAX_NODES][2]` and OG `MAX_NODES` was 24
+(`JumperlessDefines.h`), so GND-1..24 filled the per-net bridge table exactly
+and the probe bridge, added last, was dropped by `addBridgeToNet()` (message
+on Serial only). Raised to 40 (the V5 value, +5.8 KB .bss, RAM 67.9 -> 70.1 %),
+both "net full" messages now print unconditionally, and the router's L-hop
+search accepts a hop chip whose SF lane / Y0 already carry the SAME net (GND
+could not reach a corner once its rows owned the I/J lanes of A..D). Beyond 40
+bridges in one net the extras are still dropped - reported, not silent.
+
 **Test:** `test/test_og_router/run.sh` — host build of the real router against
 a crossbar model of the rev 2 wiring; it checks the CLOSED CROSSPOINTS, not
 the path table. 8/11 fixed cases failed before, 11/11 pass after; a 6000-net

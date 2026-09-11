@@ -99,6 +99,18 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   int nb = 0;
   for (auto& d : defs) {
     netStruct& n = globalState.connections.nets[d.number]; n.number = d.number; n.specialFunction = -1;
+    // Mirror NetManager: nodes[]/bridges[] are MAX_NODES deep per net; anything
+    // past that is dropped (addNodeToNet/addBridgeToNet) and is NOT expected to
+    // route. The test reports the drop so the cap stays visible.
+    if (d.bridges.size() > (size_t)MAX_NODES) { printf("  NOTE net %d: %zu bridges, only %d fit (MAX_NODES) - extras dropped like NetManager does\n", d.number, d.bridges.size(), MAX_NODES); d.bridges.resize(MAX_NODES); }
+    if (d.nodes.size() > (size_t)MAX_NODES) {
+      // nodes[] overflows one entry earlier than bridges[] (the first node has no
+      // bridge). Routing works from the bridge table, so the expectation is the
+      // set of nodes the TRACKED bridges mention; nodes[] itself is just capped.
+      printf("  NOTE net %d: %zu nodes, only %d fit in nodes[] (display list) - routing follows the bridges\n", d.number, d.nodes.size(), MAX_NODES);
+      std::vector<int> keep; for (int n : d.nodes) { bool used = false; for (auto& b : d.bridges) if (b.first == n || b.second == n) used = true; if (used) keep.push_back(n); }
+      d.nodes = keep;
+    }
     for (size_t i = 0; i < d.nodes.size(); i++) n.nodes[i] = d.nodes[i];
     for (size_t i = 0; i < d.bridges.size(); i++) { n.bridges[i][0] = d.bridges[i].first; n.bridges[i][1] = d.bridges[i].second;
       globalState.connections.bridges[nb][0] = d.bridges[i].first; globalState.connections.bridges[nb][1] = d.bridges[i].second; nb++; }
@@ -193,6 +205,21 @@ int main(int argc, char** argv) {
     fails += !runCase("3b: 3V3-3 + GND-16..30", {{6, {SUPPLY_3V3, 3}, {{SUPPLY_3V3, 3}}}, g}, verbose); }
   { NetDef g{1, {GND}, {}}; for (int r = 4; r <= 11; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
     fails += !runCase("3c: GND-4..11 alone", {g}, verbose); }
+  // Bug 4 (2026-09-11, on the fixed firmware): GND on rows 1..N. N <= 20 fine,
+  // N = 24 drops EVERY row, N = 60 keeps only row 24.
+  // The bench repro adds the ADC0 probe bridge LAST, so it was the one the
+  // per-net bridge table (MAX_NODES deep, 24 at the time) dropped: GND-1..24
+  // filled it and ADC0 never routed, every row read floating. The router was
+  // fine; the cap was hit one bridge early. Cases: N=24 (+ADC0 = 25 bridges,
+  // the bench failure), N=MAX_NODES-1 (+ADC0 = exactly full), and N=60 (still
+  // over the cap: the test expects only the tracked bridges to route, and the
+  // NOTE lines make the drop visible).
+  for (int n : {20, 24, MAX_NODES - 1, MAX_NODES, 60}) {
+    NetDef g{1, {GND}, {}}; for (int r = 1; r <= n; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
+    g.nodes.push_back(ADC0); g.bridges.push_back({ADC0, n < 12 ? n : 12});
+    char t[64]; snprintf(t, sizeof t, "4: GND-1..%d + ADC0-12 probe last", n);
+    fails += !runCase(t, {g}, verbose);
+  }
   // sanity: the thing that works on hardware
   fails += !runCase("S: 3V3-5 + 5-1 (works on hw)", {{6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
   printf("\n%d failing cases\n", fails);

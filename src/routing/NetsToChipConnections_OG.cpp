@@ -4015,7 +4015,16 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                     Serial.println();
                                 }
-                                if ((ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsSF])] == -1) && (ch[hopBB].yStatus[0] == -1))
+                                // The hop chip's SF lane and its Y0 -> L lane may already carry THIS
+                                // net (GND on rows 1..30 owns the I/J lanes of A..D); that is the
+                                // best hop there is, not a conflict. Virgin-only here meant GND could
+                                // not reach a corner once its rows filled the lanes. Both ends of the
+                                // Y0 wire (chip Y0 and L Y[chip]) must be free-or-same-net.
+                                int hopLane = xMapForChipLane0(hopBB, path[i].chip[whichIsSF]);
+                                if (hopLane >= 0 &&
+                                    (ch[hopBB].xStatus[hopLane] == -1 || ch[hopBB].xStatus[hopLane] == path[i].net) &&
+                                    (ch[hopBB].yStatus[0] == -1 || ch[hopBB].yStatus[0] == path[i].net) &&
+                                    (ch[CHIP_L].yStatus[hopBB] == -1 || ch[CHIP_L].yStatus[hopBB] == path[i].net))
                                 {
                                     if (debugNTCC2)
                                     {

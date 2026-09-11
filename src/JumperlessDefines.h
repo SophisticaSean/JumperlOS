@@ -195,9 +195,15 @@ extern int probeRev;
 // States.cpp copy it). Shrinking MAX_BRIDGES/MAX_NODES on OG cuts globalState
 // AND every copy of it, both to free heap and to keep state copies survivable.
 // MAX_NETS stays 60 (netNameConstants[] must carry one initializer per net).
+// MAX_NODES is also the per-net BRIDGE cap (netStruct.bridges[MAX_NODES][2]).
+// At 24 a GND net on rows 1..24 filled it exactly, and the NEXT bridge on that
+// net - e.g. the ADC0 probe of one of those rows - was silently dropped from
+// the net table, so it never routed (2026-09-11, rev 2 bench). 40 = the V5
+// value; on the OG it costs 16 * 6 B * MAX_NETS ~= 5.8 KB of .bss with the
+// single static globalState (the state copies this comment mentions are gone).
 #if defined(OG_JUMPERLESS)
 #define MAX_BRIDGES 72
-#define MAX_NODES 24 //this is the max number of nodes that can be connected to a net
+#define MAX_NODES 40 //this is the max number of nodes that can be connected to a net
 #else
 #define MAX_BRIDGES 128
 #define MAX_NODES 40 //this is the max number of nodes that can be connected to a net
