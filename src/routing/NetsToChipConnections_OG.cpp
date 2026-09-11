@@ -779,6 +779,16 @@ bool setChipYStatusSafe(int chip, int y, int net, const char *location) {
     return false; // Assignment failed due to conflict
   }
 
+  // OG: BB chip Y0 <-> L Y[chip] is one wire; reserve (and conflict-check) both
+  // ends. See freeOrSameNetY.
+  int mirrorChip = -1, mirrorY = -1;
+  if (chip < 8 && y == 0) { mirrorChip = CHIP_L; mirrorY = chip; }
+  else if (chip == CHIP_L) { mirrorChip = y; mirrorY = 0; }
+  if (mirrorChip != -1) {
+    int8_t other = globalState.connections.chipStates[mirrorChip].yStatus[mirrorY];
+    if (other != -1 && other != net) return false;
+    globalState.connections.chipStates[mirrorChip].yStatus[mirrorY] = net;
+  }
   // Assign the Y position
   globalState.connections.chipStates[chip].yStatus[y] = net;
 
@@ -1306,7 +1316,11 @@ void clearAllNTCC(void) {
   for (int i = 0; i < pathsToClear; i++) {
     globalState.connections.paths[i].altPathNeeded = 0;
     globalState.connections.paths[i].skip = 0;
-
+    // The memset above leaves every bool at 0xFF. The OG-only Lchip flag is
+    // only ever SET (never cleared) by the router, and `Lchip == true` on a
+    // 0xFF bool is true under -Os (gcc tests the byte for nonzero), so without
+    // this every BBtoSF alt path took the chip-L hop branch on the firmware.
+    globalState.connections.paths[i].Lchip = false;
   }
   // //clang-format off
   // struct netStruct globalState.connections.nets[MAX_NETS] = { //these are the special function nets
@@ -2427,6 +2441,12 @@ void swapDuplicateNode(int pathIndex)
             }
 
             path[pathIndex].chip[1] = duplucateSFnodes[i][2];
+            // The node may have moved on or off chip L (5V: L X14 <-> J X14,
+            // ADC0: L X2 <-> I X13, ...). The alt-path loops branch on Lchip
+            // BEFORE they re-read chip[1], so a stale flag runs the chip-L hop
+            // logic against chip I/J/K and closes that chip's Y0 for a hop that
+            // only exists on L (seen as ADC1 shorted to 5V through J Y0).
+            path[pathIndex].Lchip = (path[pathIndex].chip[0] == CHIP_L || path[pathIndex].chip[1] == CHIP_L);
             break;
 
             // path[pathIndex].x[1] = duplucateSFnodes[i][3];
@@ -2666,7 +2686,7 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
         case BBtoSF: // nodes should always be in order of the enum, so node1 is BB and node2 is SF
         {
 
-            if (path[i].chip[0] != CHIP_L && path[i].chip[1] == CHIP_L) // if theyre both chip L we'll deal with it differently
+            if (path[i].chip[0] >= 0 && path[i].chip[0] < 8 && path[i].chip[1] == CHIP_L) // BB chip A..H -> chip L (SF chip I..K -> L is an L-hop, see resolveAltPaths)
             {
                 // Serial.print("\tBBtoCHIP L  \n\n\n\n");
                 int yMapBBc0 = 0; // y 0 is always connected to chip L
@@ -3091,6 +3111,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                     if (path[i].Lchip == true)
                     {
                         // Serial.print("Lchip!!!!!!!!!!!!");
+                        if (bb == path[i].chip[0])
+                        {
+                            continue; // no chip has an X lane to itself (xMapForChipLane0 would be -1 and index xStatus[-1])
+                        }
                         if (ch[CHIP_L].yStatus[bb] == -1 || ch[CHIP_L].yStatus[bb] == path[i].net) /////////
                         {
 
@@ -3160,7 +3184,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 ch[path[i].chip[2]].yStatus[0] = path[i].net;
 
                                 path[i].x[0] = xMapForChipLane1(path[i].chip[0], path[i].chip[2]);
-                                path[i].x[1] = xMapL1c1;
+                                // x[1] is the SF node's pin on chip L, not the hop lane (the
+                                // lane-0 arm above has it right; this arm stamped xMapL1c1 and
+                                // closed whatever L pin that index happened to be).
+                                path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
 
                                 path[i].x[2] = xMapForChipLane1(path[i].chip[2], path[i].chip[0]);
                                 // path[i].x[3] = -2;
@@ -4014,7 +4041,12 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                     ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsSF])] = path[i].net;
 
-                                    ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsL])] = path[i].net;
+                                    {
+                                        // On the OG a BB chip reaches L through Y0, not an X lane, so
+                                        // this is -1 for CHIP_L; guard the index (it wrote xStatus[-1]).
+                                        int lLane = xMapForChipLane0(hopBB, path[i].chip[whichIsL]);
+                                        if (lLane >= 0) ch[hopBB].xStatus[lLane] = path[i].net;
+                                    }
 
                                     ch[hopBB].yStatus[0] = path[i].net;
                                     ch[CHIP_L].yStatus[hopBB] = path[i].net;
@@ -4278,6 +4310,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                             int chip1Lane = xMapForNode(sfChip1, bb);
                             int chip2Lane = xMapForNode(sfChip2, bb);
+                            if (chip1Lane < 0 || chip2Lane < 0)
+                            {
+                                continue; // an SF chip with no X lane into bb (chip L): xStatus[-1] read as "busy" before
+                            }
 
                             if ((ch[CHIP_L].yStatus[bb] != -1 && ch[CHIP_L].yStatus[bb] != path[i].net))
                             {
@@ -4563,6 +4599,16 @@ bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
   // Serial.print(" = ");
   if (globalState.connections.chipStates[chip].yStatus[y] == -1 ||
       (globalState.connections.chipStates[chip].yStatus[y] == net && allowStacking == 1)) {
+    // OG: a breadboard chip's Y0 and chip L's Y[that chip] are the SAME wire.
+    // A bounce on one side must see the other side's owner, or two nets can
+    // each bounce on "their" end of one lane (L Y2 vs C Y0) and short.
+    int mirrorChip = -1, mirrorY = -1;
+    if (chip < 8 && y == 0) { mirrorChip = CHIP_L; mirrorY = chip; }
+    else if (chip == CHIP_L) { mirrorChip = y; mirrorY = 0; }
+    if (mirrorChip != -1) {
+      int8_t other = globalState.connections.chipStates[mirrorChip].yStatus[mirrorY];
+      if (other != -1 && other != net) return false;
+    }
     // Serial.println("true");
     return true;
   } else {
@@ -4680,6 +4726,14 @@ void resolveUncommittedHops2(void) {}
 
 void resolveUncommittedHops(int allowStacking, int powerOnly,
                             int noOrOnlyDuplicates, int startIndex) {
+  // OG: the deferred (-2) slots this pass fills are the two halves of a bounce
+  // that the OG commit/alt branches have ALREADY reserved for this net (the hop
+  // chip's Y0 -> L lane, or a same-chip X shared by positions 0 and 2). The
+  // freeOrSameNetX/Y helpers only accept a same-net lane when allowStacking==1,
+  // so the main pass (allowStacking 2) must map to 1 exactly as commitPaths()
+  // does; otherwise the resolver refuses the net's own reservation and tears
+  // the whole path down. The duplicate pass (0) stays virgin-only.
+  allowStacking = (allowStacking == 0) ? 0 : 1;
   // OG-specific lane order: disallow bounces through SF / power X pins.
   int freeXSearchOrder[12][16] = {
       {-1, -1, 2, 3, 4, 5, 6, 7, 8, -1, 10, 11, 12, 13, 14, 15},

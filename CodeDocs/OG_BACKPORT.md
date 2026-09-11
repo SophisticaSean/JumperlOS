@@ -1214,6 +1214,65 @@ publishing a fake pick, setting `debugProbing`, driving an indicator flag.
 Injecting a button press still works the same way: write 2 to
 `ProbeButton::getInstance()::inst + 0x5c`.
 
+### Session 2026-09-11 — corner rows / dense nets: the OG router dropped what it had routed
+
+Measured on a rev 2 board running 1.7.11.1: `connect(1,"3V3")` reported the
+net but row 1 floated; with `{3V3,5,1}` and `{GND,28,30}` loaded only the
+corner routed first was live; `3V3` on row 3 next to `GND` on rows 4-11 left
+row 3 unrouted. `NetsToChipConnections_OG.cpp` found every one of those paths
+and then threw them away. Six defects, all in that file:
+
+1. **`resolveUncommittedHops(allowStacking=2)` was virgin-only.** The
+   deferred `-2` slots it fills are the second half of a bounce the OG
+   commit/alt branches had ALREADY stamped for the net (the hop chip's Y0 → L
+   lane, or a same-chip X shared by positions 0 and 2). `freeOrSameNetX/Y`
+   accept a same-net lane only when `allowStacking == 1`; `commitPaths()`
+   maps 2 → 1, the resolver did not, so it refused the net's own reservation,
+   `restoreRoutingState()` tore the path down and `couldntFindPath` reported
+   it. This alone was bugs 1-3 above. (V5 is unaffected: its bounce node is
+   never pre-stamped.)
+2. **`commitPaths()` "BB → chip L" branch ran for SF chips too** (`chip[0] !=
+   CHIP_L` instead of `< 8`), writing `ch[CHIP_L].yStatus[8|9]`, i.e. past
+   `yStatus[8]` into `xMap[0]`. `GND` (net 1) to a corner through chip I left
+   `xMap[L][0] = 1 = TOP_1`, so every later lookup of row 1 on L returned X0
+   (ISENSE_MINUS) — for the rest of the boot, since `chipStates` is filled
+   once. That is the "only one corner at a time" symptom. 1.3.22 has the same
+   overflow (its `xMap` is `int8_t`).
+3. **`Lchip` was 0xFF, not false, on every fresh path.** `clearAllNTCC()`
+   memsets `paths[]` to -1 and re-zeroes `altPathNeeded`/`skip` but not the
+   OG-only `bool Lchip`. At `-Os` gcc compiles `Lchip == true` as "byte !=
+   0", so on the firmware EVERY BBtoSF alt path took the chip-L hop branch
+   (a -O0 host build hides this; the test builds at -Os for that reason).
+4. **Stale `Lchip` after `swapDuplicateNode()`** (5V: L X14 ↔ J X14, ADC0:
+   L X2 ↔ I X13, ...): the retry ran the L-hop logic against chip I/J and
+   closed that chip's Y0 — seen as ADC1 shorted to 5V through J Y0.
+5. **`freeLane == 1` arm of the Lchip alt path stamped `x[1] = xMapL1c1`**
+   (the hop lane index) instead of the SF node's pin on L, closing whatever L
+   pin that index was (GND to GPIO_0 through BOTTOM_30 in the sweep). Same
+   typo in 1.3.22 `NetsToChipConnections.cpp`.
+6. **`L.Y[c]` and `c.Y0` are one wire but were tracked as two.** An L↔L
+   same-chip path bouncing on L Y2 and a BB path bouncing on C Y0 shorted.
+   `freeOrSameNetY` / `setChipYStatusSafe` now check and reserve both ends.
+
+Plus three `xStatus[-1]` index guards (one was a write) that UBSan flagged.
+
+**Ground truth is the schematic, not 1.3.22.** Stock 1.3.22 mishandles the
+corners on the same board (its path table silently drops `3V3-1`, and every
+corner attempt through chip A ends with `x3 = -1`); its `Lchip` branches carry
+defects 2 and 5 verbatim, so they were repaired here, not ported. The wiring
+the test models was read out of
+`Hardware/KiCAD/Jumperless Rev 3/JumperlessRev3ForPathfinding.kicad_sch`
+(labels on the CH446Q pins): chip A..H Y0 = `AL`..`HL` = chip L Y0..Y7, one
+wire each; L X8/X9/X10/X11 = rows 1/30/32(b1)/61(b30); A X0/X1/X9 = `AI`/`AJ`/
+`AK` = I/J/K Y0; BB lanes pair lane0<->lane0 (A X2 `AB0` <-> B X0 `AB0`). That
+matches `board_og.cpp` exactly, so the descriptor tables were never the bug.
+
+**Test:** `test/test_og_router/run.sh` — host build of the real router against
+a crossbar model of the rev 2 wiring; it checks the CLOSED CROSSPOINTS, not
+the path table. 8/11 fixed cases failed before, 11/11 pass after; a 6000-net
+random sweep went from ~33 % unrouted / ~4 % SHORTED to ~7 % unrouted / 0
+shorted. **Not bench-tested: the fixed UF2 has not been flashed to a board.**
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).
