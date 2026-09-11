@@ -39,6 +39,17 @@
 
 Stream Serial; Stream Serial1; Stream Jerial;
 JumperlessState globalState;
+#ifdef NETBRIDGES_H
+NetBridgePool netBridgePool;   // the firmware defines this next to globalState (States.cpp)
+#else
+// Building against a tree that predates routing/NetBridges.h (the digest
+// baseline): the same API over the old inline per-net table.
+namespace netbridges {
+  inline bool append(netStruct& n, int16_t a, int16_t b) { for (int k = 0; k < MAX_NODES; k++) if (n.bridges[k][0] == 0) { n.bridges[k][0] = a; n.bridges[k][1] = b; return true; } return false; }
+  inline int capacity() { return MAX_NODES; }
+  inline int count(const netStruct& n) { int k = 0; while (k < MAX_NODES && n.bridges[k][0] != 0) k++; return k; }
+}
+#endif
 JumperlessConfig jumperlessConfig;
 FakeGpioOutput fakeGpioOutputs[MAX_FAKE_GP_OUT];
 FakeGpioInput fakeGpioInputs[MAX_FAKE_GP_IN];
@@ -46,10 +57,17 @@ int fakeGpioInputAdcChannel = -1;
 int gpioNet[10]; int gpioReading[10]; int gpioDef[10][3]; int showADCreadings[8]; uint32_t gpioReadingColors[10];
 int newBridgeLength = 0; int numberOfShownNets = 0;
 #include "nano_init.inc"
-void initNets(void) {}
+// The firmware's initNets() reinitialises every net and resets the per-net
+// bridge pool; the harness fills the nets itself, so the stub keeps the reset.
+void initNets(void) {
+#ifdef NETBRIDGES_H
+  netbridges::resetAll();
+#endif
+}
 bool infraIsBridge(int, int) { return false; }
 void assignTermColor(int) {}
 void printBridgeArray(Stream*) {}
+static bool digest = false;   // print the closed crosspoints per case/trial (compare two builds)
 static std::string nodeName(int n) {
   switch (n) {
     case GND: return "GND"; case SUPPLY_3V3: return "3V3"; case SUPPLY_5V: return "5V";
@@ -99,26 +117,35 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   int nb = 0;
   for (auto& d : defs) {
     netStruct& n = globalState.connections.nets[d.number]; n.number = d.number; n.specialFunction = -1;
-    // Mirror NetManager: nodes[]/bridges[] are MAX_NODES deep per net; anything
-    // past that is dropped (addNodeToNet/addBridgeToNet) and is NOT expected to
-    // route. The test reports the drop so the cap stays visible.
-    if (d.bridges.size() > (size_t)MAX_NODES) { printf("  NOTE net %d: %zu bridges, only %d fit (MAX_NODES) - extras dropped like NetManager does\n", d.number, d.bridges.size(), MAX_NODES); d.bridges.resize(MAX_NODES); }
-    if (d.nodes.size() > (size_t)MAX_NODES) {
-      // nodes[] overflows one entry earlier than bridges[] (the first node has no
-      // bridge). Routing works from the bridge table, so the expectation is the
-      // set of nodes the TRACKED bridges mention; nodes[] itself is just capped.
-      printf("  NOTE net %d: %zu nodes, only %d fit in nodes[] (display list) - routing follows the bridges\n", d.number, d.nodes.size(), MAX_NODES);
-      std::vector<int> keep; for (int n : d.nodes) { bool used = false; for (auto& b : d.bridges) if (b.first == n || b.second == n) used = true; if (used) keep.push_back(n); }
+    // Mirror NetManager: nodes[] is MAX_NODES deep per net (addNodeToNet drops
+    // the rest and says so); the per-net bridge list is whatever
+    // netbridges::append accepts (V5 / the old tree: MAX_NODES slots; OG: the
+    // shared pool, which a MAX_BRIDGES netlist cannot fill). A dropped bridge
+    // is NOT expected to route; the test reports every drop so a cap stays
+    // visible.
+    bool nodesCapped = d.nodes.size() > (size_t)MAX_NODES;
+    if (nodesCapped) printf("  NOTE net %d: %zu nodes, only %d fit in nodes[] (display list) - routing follows the bridges\n", d.number, d.nodes.size(), MAX_NODES);
+    for (size_t i = 0; i < d.nodes.size() && i < (size_t)MAX_NODES; i++) n.nodes[i] = d.nodes[i];
+    std::vector<std::pair<int,int>> tracked;
+    for (size_t i = 0; i < d.bridges.size(); i++) {
+      if (!netbridges::append(n, d.bridges[i].first, d.bridges[i].second)) {
+        printf("  NOTE net %d: bridge %zu of %zu dropped - per-net bridge storage full (capacity %d) like NetManager does\n", d.number, i + 1, d.bridges.size(), netbridges::capacity());
+        break;
+      }
+      tracked.push_back(d.bridges[i]);
+      globalState.connections.bridges[nb][0] = d.bridges[i].first; globalState.connections.bridges[nb][1] = d.bridges[i].second; nb++; }
+    if (tracked.size() != d.bridges.size() || nodesCapped) {
+      // expectation = the nodes the TRACKED bridges mention (routing works
+      // from the bridge list; nodes[] is the display list)
+      d.bridges = tracked;
+      std::vector<int> keep; for (int x : d.nodes) { bool used = false; for (auto& b : d.bridges) if (b.first == x || b.second == x) used = true; if (used) keep.push_back(x); }
       d.nodes = keep;
     }
-    for (size_t i = 0; i < d.nodes.size(); i++) n.nodes[i] = d.nodes[i];
-    for (size_t i = 0; i < d.bridges.size(); i++) { n.bridges[i][0] = d.bridges[i].first; n.bridges[i][1] = d.bridges[i].second;
-      globalState.connections.bridges[nb][0] = d.bridges[i].first; globalState.connections.bridges[nb][1] = d.bridges[i].second; nb++; }
   }
   globalState.connections.numBridges = nb;
   int maxNet = 5; for (auto& d : defs) if (d.number > maxNet) maxNet = d.number;
   for (int i = 6; i <= maxNet; i++) if (globalState.connections.nets[i].number == 0) globalState.connections.nets[i].number = i;
-  if (verbose) { for (int j=1;j<8;j++){ printf("  net[%d] number=%d bridges0=%d,%d\n", j, globalState.connections.nets[j].number, globalState.connections.nets[j].bridges[0][0], globalState.connections.nets[j].bridges[0][1]); } }
+  if (verbose) { for (int j=1;j<8;j++){ printf("  net[%d] number=%d bridges=%d\n", j, globalState.connections.nets[j].number, netbridges::count(globalState.connections.nets[j])); } }
   bridgesToPaths();
   if (verbose) printf("  numberOfPaths=%d\n", (int)numberOfPaths);
   for (int c = 0; c < 12; c++) for (int j = 0; j < 16; j++) if (globalState.connections.chipStates[c].xMap[j] != B.xMap[c][j]) printf("  CORRUPT: chip %c xMap[%d] = %d (expected %d)\n", 'A'+c, j, globalState.connections.chipStates[c].xMap[j], B.xMap[c][j]);
@@ -126,11 +153,14 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   if (verbose) { printPathsCompact(); printChipStatus(); }
   // simulate what sendPath() closes
   UF uf; std::map<std::string,std::set<int>> laneNets;
+  std::set<std::string> closed;   // the exact crosspoints, for the digest
   for (int i = 0; i < numberOfPaths; i++) {
     auto& p = globalState.connections.paths[i]; if (p.skip) continue;
     for (int h = 0; h < 4; h++) { if (p.chip[h] == -1 || p.x[h] < 0 || p.y[h] < 0) continue;
-      std::string a = laneName(p.chip[h], p.x[h]), b = yName_(p.chip[h], p.y[h]); uf.u(a, b); }
+      std::string a = laneName(p.chip[h], p.x[h]), b = yName_(p.chip[h], p.y[h]); uf.u(a, b);
+      char cp[16]; snprintf(cp, sizeof cp, "%c%d.%d", 'A' + p.chip[h], (int)p.x[h], (int)p.y[h]); closed.insert(cp); }
   }
+  if (digest) { printf("  DIGEST paths=%d:", (int)numberOfPaths); for (auto& c : closed) printf(" %s", c.c_str()); printf("\n"); }
   bool ok = true;
   for (auto& d : defs) {
     std::string root = uf.f("node_" + nodeName(d.nodes[0]));
@@ -147,17 +177,18 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   return ok;
 }
 static int quiet = 0;
-static bool runCaseQ(std::vector<NetDef> defs, int& shorts, int& unrouted) {
-  // same as runCase but silent; returns ok and tallies
+static bool runCaseQ(std::vector<NetDef> defs, int& shorts, int& unrouted, int trial = -1) {
+  // same as runCase but silent; returns ok and tallies (DIGEST lines pass through)
   int f = 0; (void)f;
   fflush(stdout); int saved = dup(1); FILE* tmp = tmpfile(); dup2(fileno(tmp), 1);
   bool ok = runCase("rand", defs, false);
   fflush(stdout); dup2(saved, 1); close(saved);
-  rewind(tmp); char line[512]; while (fgets(line, sizeof line, tmp)) { if (strstr(line, "SHORTED") || strstr(line, "touches")) shorts++; else if (strstr(line, "NOT connected")) unrouted++; }
+  rewind(tmp); char line[4096]; while (fgets(line, sizeof line, tmp)) { if (strstr(line, "SHORTED") || strstr(line, "touches")) shorts++; else if (strstr(line, "NOT connected")) unrouted++; else if (digest && strstr(line, "DIGEST")) printf("trial %d %s", trial, line); }
   fclose(tmp);
   return ok;
 }
 int main(int argc, char** argv) {
+  if (getenv("OG_ROUTER_DIGEST")) digest = true;
   if (argc > 2 && std::string(argv[1]) == "rand") {
     unsigned seed = atoi(argv[2]); int n = argc > 3 ? atoi(argv[3]) : 200; srand(seed);
     debugNTCC = false; debugNTCC2 = false;
@@ -182,7 +213,7 @@ int main(int argc, char** argv) {
       if (argc > 6) { debugNTCC2 = true; runCase("replay", defs, true); return 0; }
       total++;
       int sh = 0, un = 0;
-      if (!runCaseQ(defs, sh, un)) { fails++; if (sh) shortTrials++; if (argc > 4 && (sh || argc > 5)) { printf("seed %u trial %d FAILED:", seed, t); for (auto& d : defs) { printf(" net%d{", d.number); for (int x : d.nodes) printf("%s ", nodeName(x).c_str()); printf("}"); } printf("\n"); } }
+      if (!runCaseQ(defs, sh, un, t)) { fails++; if (sh) shortTrials++; if (argc > 4 && (sh || argc > 5)) { printf("seed %u trial %d FAILED:", seed, t); for (auto& d : defs) { printf(" net%d{", d.number); for (int x : d.nodes) printf("%s ", nodeName(x).c_str()); printf("}"); } printf("\n"); } }
     }
     printf("random sweep seed=%u: %d/%d trials failed, %d with SHORTS\n", seed, fails, total, shortTrials);
     return 0;
@@ -205,23 +236,86 @@ int main(int argc, char** argv) {
     fails += !runCase("3b: 3V3-3 + GND-16..30", {{6, {SUPPLY_3V3, 3}, {{SUPPLY_3V3, 3}}}, g}, verbose); }
   { NetDef g{1, {GND}, {}}; for (int r = 4; r <= 11; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
     fails += !runCase("3c: GND-4..11 alone", {g}, verbose); }
-  // Bug 4 (2026-09-11, on the fixed firmware): GND on rows 1..N. N <= 20 fine,
-  // N = 24 drops EVERY row, N = 60 keeps only row 24.
-  // Bench repro: GND on rows 1..N, then the ADC0 probe bridge added LAST.
-  // netStruct.bridges[] is MAX_NODES (24) deep per net, so at N=24 the probe is
-  // the 25th bridge and NetManager drops it (now reported on Serial) - every
-  // row then reads floating because ADC0 never routes. That is a documented
-  // limit, not a router bug (raising MAX_NODES starved the MicroPython heap),
-  // so the harness mirrors the drop: the NOTE line shows it and only the
-  // tracked bridges are expected to route. N=23 (+probe = exactly full) must
-  // route the probe; N=40/60 exercise a corner (31) reached through lanes the
-  // net already owns (the L-hop same-net fix).
-  for (int n : {20, MAX_NODES - 1, MAX_NODES, 40, 60}) {
+  // Bug 4 (2026-09-11): GND on rows 1..N, then the ADC0 probe bridge added
+  // LAST (the bench repro: every row read floating because ADC0 never routed).
+  // The per-net bridge table was MAX_NODES=24 deep, so at N=24 the probe was
+  // the 25th bridge and NetManager dropped it. The OG now files bridges in a
+  // shared pool (routing/NetBridges.h) with no per-net cap, so EVERY N routes
+  // the probe, up to the whole board (N=60: 61 bridges, 62 nodes - the node
+  // list is 64 deep). N=40/60 also exercise a corner (31) reached through
+  // lanes the net already owns (the L-hop same-net fix). If a NOTE line ever
+  // appears here again, a cap is back.
+  for (int n : {20, 23, 24, 40, 60}) {
     NetDef g{1, {GND}, {}}; for (int r = 1; r <= n; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
     g.nodes.push_back(ADC0); g.bridges.push_back({ADC0, n < 12 ? n : 12});
     char t[64]; snprintf(t, sizeof t, "4: GND-1..%d + ADC0-12 probe last", n);
     fails += !runCase(t, {g}, verbose);
   }
+  // The pool holds 2*MAX_BRIDGES entries so a full MAX_BRIDGES netlist always
+  // fits: 72 bridges spread over 6 nets, none dropped, all routed or at least
+  // never shorted (the crossbar cannot route everything - the check that
+  // matters is no NOTE/drop and no short). Nets: GND on 1..30 (30 bridges),
+  // 3V3 on 32..49 (18), DAC0 on 50..55 (6), ADC0 on 56..60 (5), and two
+  // row-only nets (7 + 6 bridges) = 72.
+  {
+    std::vector<NetDef> big;
+    { NetDef g{1, {GND}, {}}; for (int r = 1; r <= 30; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); } big.push_back(g); }
+    { NetDef g{6, {SUPPLY_3V3}, {}}; for (int r = 32; r <= 49; r++) { g.nodes.push_back(r); g.bridges.push_back({SUPPLY_3V3, r}); } big.push_back(g); }
+    { NetDef g{7, {DAC0}, {}}; for (int r = 50; r <= 55; r++) { g.nodes.push_back(r); g.bridges.push_back({DAC0, r}); } big.push_back(g); }
+    { NetDef g{8, {ADC0}, {}}; for (int r = 56; r <= 60; r++) { g.nodes.push_back(r); g.bridges.push_back({ADC0, r}); } big.push_back(g); }
+    { NetDef g{9, {NANO_D0}, {}}; for (int k = 1; k <= 7; k++) { g.nodes.push_back(NANO_D0 + k); g.bridges.push_back({NANO_D0, NANO_D0 + k}); } big.push_back(g); }
+    { NetDef g{10, {NANO_A0}, {}}; for (int k = 1; k <= 6; k++) { g.nodes.push_back(NANO_A0 + k); g.bridges.push_back({NANO_A0, NANO_A0 + k}); } big.push_back(g); }
+    int total = 0; for (auto& d : big) total += (int)d.bridges.size();
+    if (total != MAX_BRIDGES) { printf("test bug: %d bridges, wanted MAX_BRIDGES=%d\n", total, MAX_BRIDGES); fails++; }
+    // this one is allowed to leave nodes unrouted (crossbar capacity), not to short or drop
+    fflush(stdout); int saved = dup(1); FILE* tmp = tmpfile(); dup2(fileno(tmp), 1);
+    runCase("6: MAX_BRIDGES bridges in 6 nets", big, verbose);
+    fflush(stdout); dup2(saved, 1); close(saved); rewind(tmp);
+    int shorts = 0, drops = 0, unrouted = 0; char line[4096];
+    while (fgets(line, sizeof line, tmp)) { if (strstr(line, "SHORTED") || strstr(line, "touches")) shorts++; if (strstr(line, "NOTE")) drops++; if (strstr(line, "NOT connected")) unrouted++; }
+    fclose(tmp);
+    printf("\n=== 6: MAX_BRIDGES=%d bridges in 6 nets ===\n  drops=%d shorts=%d unrouted=%d  %s\n", MAX_BRIDGES, drops, shorts, unrouted, (drops || shorts) ? "FAIL" : "PASS");
+    fails += (drops || shorts) ? 1 : 0;
+  }
+#ifdef NETBRIDGES_H
+  // The OG pool itself: append / count / iteration order / clear frees /
+  // detach does not / merge keeps A's bridges before B's / exhaustion is
+  // reported by append returning false, never by writing out of bounds.
+  {
+    printf("\n=== 7: netbridges pool lifecycle ===\n");
+    bool ok = true;
+    netbridges::resetAll();
+    netStruct a{}, b{};
+    for (int i = 1; i <= 10; i++) ok &= netbridges::append(a, i, i + 1);
+    for (int i = 1; i <= 5; i++) ok &= netbridges::append(b, 100 + i, 200 + i);
+    ok &= netbridges::count(a) == 10 && netbridges::count(b) == 5 && netbridges::poolUsed() == 15;
+    { int i = 1; for (auto it = netbridges::begin(a); it.valid(); it.next(), i++) ok &= it.node1() == i && it.node2() == i + 1; ok &= i == 11; }
+    // merge the way combineNets does: append b's list to a, then free b
+    for (auto it = netbridges::begin(b); it.valid(); it.next()) ok &= netbridges::append(a, it.node1(), it.node2());
+    netbridges::clear(b);
+    ok &= netbridges::count(a) == 15 && netbridges::count(b) == 0 && netbridges::poolUsed() == 15;
+    { int i = 1; for (auto it = netbridges::begin(a); it.valid(); it.next(), i++) { if (i <= 10) ok &= it.node1() == i; else ok &= it.node1() == 100 + (i - 10); } ok &= i == 16; }
+    // shiftNets: a copy of the header must be detached, not cleared
+    netStruct copy = a; netbridges::detach(copy);
+    ok &= netbridges::count(a) == 15 && netbridges::poolUsed() == 15 && netbridges::count(copy) == 0;
+    // exhaustion: capacity - 15 more appends succeed, the next fails, nothing else changes
+    int room = netbridges::capacity() - netbridges::poolUsed(); netStruct c{};
+    for (int i = 0; i < room; i++) ok &= netbridges::append(c, 7, 8);
+    ok &= !netbridges::append(c, 7, 8) && netbridges::count(c) == room && netbridges::poolUsed() == netbridges::capacity();
+    netbridges::clear(c); ok &= netbridges::poolUsed() == 15;
+    ok &= netbridges::append(c, 7, 8) && netbridges::poolUsed() == 16;
+    netbridges::clear(a); netbridges::clear(c); ok &= netbridges::poolUsed() == 0;
+    // the routing state's own sizes, so the memory this bought stays bought
+    printf("  sizeof(netStruct)=%zu sizeof(pathStruct)=%zu sizeof(NetBridgePool)=%zu MAX_NODES=%d capacity=%d\n", sizeof(netStruct), sizeof(pathStruct), sizeof(NetBridgePool), MAX_NODES, netbridges::capacity());
+    // ARM: enums are 1 byte and pointers 4 -> pathStruct 40, netStruct 104.
+    // The host build pays 4-byte enums and 8-byte pointers on top of that.
+    ok &= sizeof(pathStruct) <= 40 + 4 * (sizeof(enum pathType) - 1)
+       && sizeof(netStruct) <= 104 + 4 * (sizeof(void*) - 4)
+       && netbridges::capacity() >= 2 * MAX_BRIDGES;
+    printf("  %s\n", ok ? "PASS" : "FAIL"); fails += !ok;
+    netbridges::resetAll();
+  }
+#endif
   // Corner reached only through lanes the same net already owns: two GND rows
   // on EVERY breadboard chip take both its I and J lanes (17 bridges, under
   // the cap), so 31 can only hop through a lane GND already holds. The L-hop

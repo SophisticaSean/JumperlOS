@@ -2,6 +2,7 @@
 
 #ifndef JUMPERLESSDEFINES_H
 #define JUMPERLESSDEFINES_H
+#include <stdint.h>
 // #include "SerialWrapper.h"
 // #define Serial SerialWrap
 
@@ -188,26 +189,54 @@ extern int probeRev;
 #define USB_MODE_ADDRESS 165
 
 #define MAX_NETS 60
-// JumperlessState is dominated by nets[MAX_NETS] (each holds nodes[MAX_NODES] +
-// bridges[MAX_NODES][2]) and paths[MAX_BRIDGES]. On V5 that's ~50 KB. The RP2040
-// (OG) has only ~50 KB of TOTAL free RAM (heap+stack) after static, so it cannot
-// hold a second copy of the state (the slot-load / migration / preview paths in
-// States.cpp copy it). Shrinking MAX_BRIDGES/MAX_NODES on OG cuts globalState
-// AND every copy of it, both to free heap and to keep state copies survivable.
+// JumperlessState is dominated by nets[MAX_NETS] and paths[MAX_BRIDGES]. On V5
+// that's ~50 KB and it does not matter (520 KB SRAM + PSRAM). The RP2040 (OG)
+// carves the MicroPython heap out of whatever .bss leaves, so every byte of
+// static routing state is a byte of user heap. The OG therefore stores the
+// same state in narrower types (see the jl_* typedefs below and
+// routing/MatrixState.h / routing/NetBridges.h):
+//   - pathStruct: chip/x/y/candidates/net fit int8_t, node ids fit int16_t
+//     (128 B -> 40 B per path);
+//   - netStruct.nodes[]: node ids are 1..199 and 0 means "empty" (the only
+//     writer is addNodeToNet), so uint8_t is exact (2 B -> 1 B per slot);
+//   - netStruct.bridges[MAX_NODES][2] (96 B per net, 1440 slots for a board
+//     that holds MAX_BRIDGES=72 bridges) is replaced by ONE shared pool of
+//     2*MAX_BRIDGES entries with a per-net linked list, so a net can hold
+//     every bridge on the board and the per-net BRIDGE cap is gone. The
+//     "bridge pool full" message in NetManager::addBridgeToNet is the limit
+//     that survives (it cannot trigger for any netlist that fits MAX_BRIDGES).
 // MAX_NETS stays 60 (netNameConstants[] must carry one initializer per net).
-// MAX_NODES is also the per-net BRIDGE cap (netStruct.bridges[MAX_NODES][2]).
-// A GND net on rows 1..24 fills it exactly and the NEXT bridge on that net
-// (e.g. the ADC0 probe of one of those rows) is dropped - NetManager now says
-// so on Serial ("net full (MAX_NODES=24)"). It cannot be raised on the OG:
-// 40 cost 5.8 KB of .bss and the MicroPython heap is carved from what .bss
-// leaves - gc.mem_free() fell ~18000 -> 10784 and scripts died with
-// MemoryError (bench 2026-09-11). 24 stays; big nets must stay under 24 bridges.
+// MAX_NODES is the per-net NODE cap (netStruct.nodes[MAX_NODES], reported by
+// NetManager::addNodeToNet as "net full (MAX_NODES=..)"). With 1-byte node
+// slots the OG affords 64: GND plus all 60 rows plus three more in one net.
+// The old 24 (2-byte slots, 48 B/net) filled at GND-1..23 and dropped the
+// next node; a net whose node list overflows is a routing hazard (the extra
+// node is not findable, so a later bridge to it starts a second net).
+// History: raising V5's MAX_NODES=40 onto the OG cost 5.8 KB of .bss and
+// gc.mem_free() fell ~18000 -> 10784 (bench 2026-09-11); this layout spends
+// less than the old 24 did.
 #if defined(OG_JUMPERLESS)
 #define MAX_BRIDGES 72
-#define MAX_NODES 24 //this is the max number of nodes that can be connected to a net
+#define MAX_NODES 64 //this is the max number of nodes that can be connected to a net
 #else
 #define MAX_BRIDGES 128
 #define MAX_NODES 40 //this is the max number of nodes that can be connected to a net
+#endif
+
+// Storage types for the routing state. The OG narrows them (every value
+// range is documented at the field); V5 keeps the original types so its build
+// is unchanged. Anything compared against -1 stays SIGNED - a -1 sentinel in
+// an unsigned field silently becomes 255.
+#if defined(OG_JUMPERLESS)
+typedef int8_t  jl_pathIdx_t;   // chip (-1..11), x (-2..15), y (-2..7), net (-1..59), flags
+typedef int16_t jl_pathNode_t;  // node ids (-1, 0..199) - BOUNCE_NODE is 199, > INT8_MAX
+typedef uint8_t jl_netNode_t;   // netStruct.nodes / doNotIntersectNodes: 0 = empty, 1..199
+typedef int8_t  jl_netSmall_t;  // netStruct.priority (0/1), numberOfDuplicates (0..MAX_DUPLICATE)
+#else
+typedef int     jl_pathIdx_t;
+typedef int     jl_pathNode_t;
+typedef int16_t jl_netNode_t;
+typedef int     jl_netSmall_t;
 #endif
 #define MAX_DNI 8 // max number of doNotIntersect rules
 #define MAX_DUPLICATE 8 // max number of duplicates

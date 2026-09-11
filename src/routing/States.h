@@ -142,7 +142,8 @@ struct ConnectionState {
     bool pathsCacheValid;  // Set to false when connections change
     
     chipStatus chipStates[12];  // Derived from paths
-    struct justXY chipXY[12];   // Crossbar switch states (reconstructed from paths)
+    // (a `struct justXY chipXY[12]` used to sit here - 1536 B that nothing
+    // ever read; the live crossbar image is CH446Q.cpp's lastChipXY[].)
     bool chipStatesCacheValid;
     
     ConnectionState();

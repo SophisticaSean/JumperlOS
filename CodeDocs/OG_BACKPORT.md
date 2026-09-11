@@ -1290,6 +1290,106 @@ the path table. 8/11 fixed cases failed before, 11/11 pass after; a 6000-net
 random sweep went from ~33 % unrouted / ~4 % SHORTED to ~7 % unrouted / 0
 shorted. **Not bench-tested: the fixed UF2 has not been flashed to a board.**
 
+### Session 2026-09-11 (2) — the routing state shrinks, the per-net bridge cap goes (branch `opt/og-routing-memory`)
+
+Every byte of static routing state is a byte of MicroPython heap on the OG
+(the 24-node cap above was the symptom). Audit of the 117bb11 `jumperless_og`
+ELF (`arm-none-eabi-nm --size-sort`, struct layouts from a `-g` probe TU built
+with the firmware's exact flags): RAM 178000 B = `.data` 50464 + `.bss` 127536.
+
+| static consumer | bytes | what it is |
+|---|---|---|
+| code in `.data` (RAM) | ~50 000 | pico-sdk default: libm/libgcc/`mem*` + every `__not_in_flash_func` (LED renderers, ADC) - **not touched**, flash-write safety |
+| `globalState` | 32 496 | `ConnectionState` 24 256 (`nets[60]` 11 760, `paths[72]` 9 216, dead `chipXY[12]` 1 536, `chipStates` 1 008) + `DisplayState` 5 288 + `PartsState` 2 496 |
+| `mp_state_ctx` | 9 160 | MicroPython |
+| `singleCharCommands`, `CommandBuffer`, UART queues | 2.6 K / 2.6 K / 2 K x3 | serial |
+| routing tables in `.data` | ~4 600 | `rev4minusXmap`/`rev5plusXmap` (768 each), `connectionNamesX/Y` (1 152), `sfMappings` (800), `globalDoNotIntersects` (480), `def*ToChar*` (672) - initialised, never written, so RAM only for want of `const` |
+| OG router scratch | ~1 500 | `pathsWithCandidates`, `fillUnusedPaths` statics, `fakeGpioInput*` - `int` arrays of bytes-sized values |
+| `NetManager::newBridge` | 864 | `int[72][3]` mirror of `bridges[][3]` (int16) - left alone |
+| `nano` | 748 | mostly const tables + 4 mutable status arrays in one struct - left alone |
+
+The five findings: (1) **holds** - `netStruct.bridges[24][2]` was 96 B x 60 =
+5 760 B, 1 440 slots for 72 bridges; (2) **holds in spirit, not as a bitmap** -
+node ids are 1..199 so a byte is exact, but `nodes[]` is an insertion-ordered
+list at 168 sites (`nodes[0]` is the "first node" that colour/name
+reconciliation keys on), so a bitmap would change observable ordering; the
+byte-wide list lets `MAX_NODES` go 24 -> 64 for less RAM than 24 cost;
+(3) **holds** - `pathStruct` was 128 B (30 `int`s), now 40 B; (4) **already
+resolved** - `JumperlessState` is non-copyable and the five copies are gone
+(`States.h`), nothing copies `ConnectionState` either; the one whole-state
+`memset` is `ConnectionState::clear`; (5) see the table - the largest lever
+left is the ~50 KB of code in RAM, which is a flash-safety design decision,
+not routing state.
+
+**What changed** (`src/routing/NetBridges.h` is new; everything OG-only is
+behind `OG_JUMPERLESS` typedefs in `JumperlessDefines.h`, V5's types are
+unchanged):
+- `pathStruct`: `chip/x/y/candidates/net/altPathNeeded/duplicate` ->
+  `int8_t`, `node1/node2` -> `int16_t` (`BOUNCE_NODE` is 199). All signed, so
+  `clearAllNTCC`'s `memset(-1)` still reads back as -1 everywhere.
+- `netStruct`: `nodes[]`/`doNotIntersectNodes[]` -> `uint8_t` (0 = empty,
+  the only writer is `addNodeToNet`, which now also refuses an id > 255
+  instead of truncating it), `priority`/`numberOfDuplicates` -> `int8_t`,
+  and `bridges[MAX_NODES][2]` -> a 3-byte `{head, tail, count}` into ONE
+  shared pool of `2*MAX_BRIDGES` = 144 entries (6 B each, 874 B total,
+  `netBridgePool` next to `globalState` in `States.cpp`). The per-net BRIDGE
+  cap is gone: a net can carry all 72 bridges (a bridge between two special
+  nets is listed under both, and a merge appends before it frees, hence 2x).
+  `NetManager`, both routers and the harness go through `netbridges::`
+  (`begin/valid/next`, `append`, `count`, `clear`, `detach`, `resetAll`); on
+  V5 the same API wraps the inline table. Lifecycle: `resetAll()` in
+  `initNets()` and `ConnectionState::clear()`; `shiftNets` frees the deleted
+  net BEFORE the struct-copy shift and `detach`es the vacated last slot
+  (its header now belongs to the net below). Iteration order is insertion
+  order on both boards; a merged net keeps A's bridges before B's.
+- `MAX_NODES` on the OG: 24 -> 64 (GND + all 60 rows + 3). `netStruct` is
+  196 -> 104 B *including* that; `Graphics.cpp`'s four `MAX_NODES` stack
+  arrays are a byte wide on the OG so core 1's frame does not grow.
+- Dead `ConnectionState::chipXY[12]` removed (both boards, 1 536 B; only a
+  `memset` ever touched it). The seven `.data` tables above are `const`
+  (both boards; the compiler proves nobody writes them).
+- OG router scratch statics narrowed to `int8_t`/`int16_t`.
+- `FileParsing.cpp`: the legacy special-functions parser bound `toInt(int&)`
+  to `path.node1/2`; it goes through an `int` now, keeping toInt's
+  leave-unchanged-on-failure contract.
+
+**Numbers** (`pio run -e jumperless_og`, clean): RAM **178000 -> 161192 B
+(-16808, 67.9 % -> 61.5 %)**; `.bss` 127536 -> 113720 (-13816), `.data`
+50464 -> 47472 (-2992); `globalState` 32496 -> 19104 (+874 pool);
+`ConnectionState` 24256 -> 10864. Flash +1248 B. V5: RAM 320228 -> 315628
+(-4600: the const tables and the dead member), 52 of 8227 functions change
+size (address materialisation after the 1.5 KB layout shift plus the touched
+NetManager/States functions), behaviour identical. Expected MicroPython heap
+gain on the OG: the heap is carved from what `.bss` leaves, so roughly the
+same ~16.8 KB (the 5760 B experiment moved `gc.mem_free()` 1:1) - i.e. from
+~18 000 to ~34 000 free after soft reset, or room to raise the configured
+heap rung. **Not yet measured on hardware.**
+
+**Proof** (`test/test_og_router/run.sh`): 20/20 (the 17 plus: GND-1..60 +
+probe = 61 paths routed; a 72-bridge/6-net netlist with 0 drops, 0 shorts;
+the pool's append/merge-order/clear/detach/exhaustion unit case). The same
+harness built against 117bb11 with the new `OG_ROUTER_DIGEST=1` mode: the
+closed crosspoints are **byte-identical for 10 000 random trials (5 seeds x
+2000) and every fixed case except the three where 117bb11 dropped bridges at
+the 24 cap** (the new tree routes 25/41/61 paths there). clang
+`-fsanitize=undefined,implicit-conversion,integer` over all of it: zero
+truncation/conversion reports in either tree; both trees show the same five
+pre-existing `xStatus[-1]` reads (NetsToChipConnections_OG.cpp ~3699/3701/
+3766/4388/4491 - the byte before `xStatus` is `chipChar`; fixing them can
+change a routing decision, so left for a router pass).
+
+**Deliberately not done**: `nodes[]` as a bitmap (ordering, above);
+`DisplayState` (5.3 KB: `colorName[32]`/`name[32]` x 60 x 2 - user-visible
+name lengths, not routing); `PartsState`; `nano` split; `newBridge` (int16
+would save 432 B but it is shared V5 code with a header-visible type); the
+RAM-resident code; `chipStatus` (96 B for a positional-init hazard).
+**Risks**: the pool lifecycle rests on the three `NetManager` sites above
+being the only per-net writers (they are, per grep, and the sweep-era
+out-of-bounds table scans are gone with the API); anything that ever writes
+a node id into `nodes[]` other than `addNodeToNet` would need the same range
+guard; `MAX_NODES=64` grows `JsonState.cpp`'s `int nodes[MAX_NODES]` stack
+frame by 160 B (core 0).
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).
@@ -1331,6 +1431,13 @@ shorted. **Not bench-tested: the fixed UF2 has not been flashed to a board.**
 ## Key files
 
 - Contract: `src/boards/board.h`, `src/boards/board.cpp`
+- Routing state: `src/routing/MatrixState.h` (`netStruct`/`pathStruct`),
+  `src/routing/NetBridges.h` (per-net bridge lists: OG pool / V5 table),
+  `src/JumperlessDefines.h` (`MAX_NODES`/`MAX_BRIDGES`, the `jl_*` storage
+  typedefs)
+- Router test: `test/test_og_router/run.sh` (host build of the OG router
+  against a crossbar model; `OG_ROUTER_DIGEST=1` and a clang-UBSan recipe in
+  the header)
 - Descriptors: `src/boards/v5/board_v5.cpp`, `src/boards/og/board_og.cpp`
 - Build: `platformio.ini` (`[env:jumperless_og]`)
 - Test: `test/test_boards/test_boards.cpp`

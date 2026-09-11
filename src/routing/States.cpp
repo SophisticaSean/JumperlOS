@@ -27,13 +27,14 @@
 // CRITICAL MEMORY SAFETY NOTES
 // ============================================================================
 //
-// JumperlessState and ConnectionState contain MASSIVE arrays:
-//   - bridges[192][3]        = 2,304 bytes
-//   - bridgeColors[192]      = 768 bytes
-//   - nets[60]               = ~30 KB (depends on netStruct size)
-//   - paths[192]             = ~20 KB (depends on pathStruct size)
+// JumperlessState and ConnectionState contain MASSIVE arrays (V5 / OG):
+//   - bridges[MAX_BRIDGES][3]   = 768 / 432 bytes
+//   - bridgeColors[MAX_BRIDGES] = 512 / 288 bytes
+//   - nets[60]                  = ~11.8 KB / 6.2 KB (netStruct 196 / 104 B)
+//   - paths[MAX_BRIDGES]        = ~16 KB / 2.9 KB (pathStruct 128 / 40 B)
 //   
-// TOTAL SIZE: ~50+ KB per JumperlessState instance!
+// TOTAL SIZE: ~40 KB (V5) / ~19 KB (OG) per JumperlessState instance!
+// (The OG figures are the 2026-09-11 narrowed layout - see JumperlessDefines.h.)
 //
 // **NEVER COPY THESE OBJECTS!**
 //   - Copying exhausts limited stack memory on embedded systems
@@ -67,6 +68,11 @@ String booleanToString(bool value);
 
 // Global singleton - THE single source of truth for all Jumperless state
 JumperlessState globalState;
+#if defined(OG_JUMPERLESS)
+// The shared per-net bridge pool (routing/NetBridges.h); belongs to
+// globalState.connections, kept outside it so the header stays Arduino-free.
+NetBridgePool netBridgePool;
+#endif
 
 // Set custom net name - stored by NET NUMBER in DisplayState
 // Pass empty string or nullptr to clear
@@ -115,10 +121,12 @@ void ConnectionState::clear() {
     chipStatesCacheValid = false;
     clearAllNTCC();
 
-    // Clear nets
+    // Clear nets (every per-net bridge list goes with them: reset the pool
+    // rather than leak the entries whose headers this memset erases)
     for (int i = 0; i < MAX_NETS; i++) {
         memset(&nets[i], 0, sizeof(netStruct));
     }
+    netbridges::resetAll();
     
     // Clear paths
     memset(paths, 0, sizeof(paths));
@@ -126,7 +134,6 @@ void ConnectionState::clear() {
     // Clear chip states
     for (int i = 0; i < 12; i++) {
         memset(&chipStates[i], 0, sizeof(chipStatus));
-        memset(&chipXY[i], 0, sizeof(struct justXY));
     }
 
     // Restore locked connections after all state has been reset.

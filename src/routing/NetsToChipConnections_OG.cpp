@@ -135,8 +135,9 @@ extern bool debugNTCC5;
 extern volatile int numberOfPaths;
 
 // Storage for original net numbers of fake GPIO input paths
-static int fakeGpioInputOriginalNets[MAX_BRIDGES];
-static int fakeGpioInputPathIndices[MAX_BRIDGES];
+// Net numbers (-1..MAX_NETS-1) and path indexes (0..MAX_BRIDGES-1): a byte each.
+static int8_t fakeGpioInputOriginalNets[MAX_BRIDGES];
+static int8_t fakeGpioInputPathIndices[MAX_BRIDGES];
 static int numFakeGpioInputPaths = 0;
 
 // Check if a path is a FAKE_GP_IN path by checking its node endpoints directly.
@@ -359,7 +360,7 @@ int numberOfUniqueNets = 0;
 int numberOfNets = 0;
 volatile int numberOfPaths = 0;
 
-int pathsWithCandidates[MAX_BRIDGES] = {0};
+int8_t pathsWithCandidates[MAX_BRIDGES] = {0};  // path indexes, 0..MAX_BRIDGES-1
 int pathsWithCandidatesIndex = 0;
 
 int numberOfUnconnectablePaths = 0;
@@ -1311,7 +1312,7 @@ void clearAllNTCC(void) {
   pathsToClear = MAX_BRIDGES; // yeah fuck that
   
   // Fast bulk clear with memset
-  memset(pathsWithCandidates, 0, pathsToClear * sizeof(int));
+  memset(pathsWithCandidates, 0, pathsToClear * sizeof(pathsWithCandidates[0]));
   memset(globalState.connections.paths, -1, pathsToClear * sizeof(pathStruct));
   for (int i = 0; i < pathsToClear; i++) {
     globalState.connections.paths[i].altPathNeeded = 0;
@@ -1464,18 +1465,15 @@ void sortPathsByNet(
       break;
     }
 
-    for (int k = 0; k < MAX_NODES; k++) {
-      if (globalState.connections.nets[j].bridges[k][0] == 0) {
-        break;
-        // continue;
-      } else {
+    for (netbridges::Iter it = netbridges::begin(globalState.connections.nets[j]); it.valid(); it.next()) {
+      {
         // paths[] is [MAX_BRIDGES], but the per-net entries can total more than
         // that: combineNets lists one merged bridge under both surviving nets.
         if (pathIndex >= MAX_BRIDGES) {
           break;
         }
-        int node1 = globalState.connections.nets[j].bridges[k][0];
-        int node2 = globalState.connections.nets[j].bridges[k][1];
+        int node1 = it.node1();
+        int node2 = it.node2();
         
         globalState.connections.paths[pathIndex].net = globalState.connections.nets[j].number;
         globalState.connections.paths[pathIndex].node1 = node1;
@@ -1983,16 +1981,7 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
       // Serial.println(globalState.connections.nets[n].nodes[i]);
     }
 
-    for (int i = 0; i < MAX_NODES; i++) {
-      if (globalState.connections.nets[n].bridges[i][0] == 0) {
-        break;
-      }
-      bridgeCount[n]++;
-      // Serial.print(" \n\rbridges: ");
-      // Serial.print(globalState.connections.nets[n].bridges[i][0]);
-      // Serial.print("-");
-      // Serial.println(globalState.connections.nets[n].bridges[i][1]);
-    }
+    bridgeCount[n] = netbridges::count(globalState.connections.nets[n]);
     // Serial.println("\n\r");
   }
 
@@ -2007,10 +1996,11 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
   int duplindex = 0;
   // Keep these off stack to avoid intermittent stack-overflow crashes while
   // routing (fillUnusedPaths can be called deep in the routing pipeline).
-  static int bridgeDuplicateBudget[MAX_BRIDGES];
-  static int bridgeNode1[MAX_BRIDGES];
-  static int bridgeNode2[MAX_BRIDGES];
-  static int bridgeNet[MAX_BRIDGES];
+  // Mirrors of bridges[][0..2] (int16_t) and the net number: same widths.
+  static int16_t bridgeDuplicateBudget[MAX_BRIDGES];
+  static int16_t bridgeNode1[MAX_BRIDGES];
+  static int16_t bridgeNode2[MAX_BRIDGES];
+  static int8_t bridgeNet[MAX_BRIDGES];
   int maxDuplicateRounds = 0;
   int bridgesToProcess = globalState.connections.numBridges;
   if (bridgesToProcess > MAX_BRIDGES) {

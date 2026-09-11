@@ -2831,7 +2831,10 @@ void parseStringToBridges(void) {
     // Jerial.print("stringIndex = ");
     // Jerial.println(stringIndex);
 
-    buffer.toInt(globalState.connections.paths[newBridgeIndex].node1);
+    { // toInt wants an int&; the path stores node ids narrower on the OG
+      int parsedNode = 0;   // toInt leaves it alone when the token is not a number
+      if (buffer.toInt(parsedNode)) globalState.connections.paths[newBridgeIndex].node1 = parsedNode;
+    }
 
     // Jerial.print("globalState.connections.paths[newBridgeIndex].node1 = ");
     // Jerial.println(globalState.connections.paths[newBridgeIndex].node1);
@@ -2844,7 +2847,10 @@ void parseStringToBridges(void) {
     stringIndex =
         specialFunctionsString.stoken(buffer, stringIndex, delimiters);
 
-    buffer.toInt(globalState.connections.paths[newBridgeIndex].node2);
+    {
+      int parsedNode = 0;
+      if (buffer.toInt(parsedNode)) globalState.connections.paths[newBridgeIndex].node2 = parsedNode;
+    }
 
     if (debugFP) {
       Jerial.print("node2 = ");
