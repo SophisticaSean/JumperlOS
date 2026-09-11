@@ -36,8 +36,20 @@
 // ponytail: ceiling is total SRAM split between this GC heap and the C heap;
 // grow further only by reclaiming more V5-only static RAM (logo palettes, menu
 // buffers, globalState - see OG_BACKPORT.md), NOT by taking more from C heap.
-#define MICROPY_HEAP_SIZE       (28 * 1024)
-#define MICROPY_HEAP_SIZE_PSRAM (28 * 1024)
+//
+// 2026-09-11: 40 KB, sized from the linker map of the opt/og-routing-memory
+// build, not guessed. The C heap region (.heap, end of .bss to the top of
+// the 256 KB bank) is 99 276 B. Boot-time allocations (core 1's 8 KB stack,
+// the SPIFTL map, MpRemote/CDC buffers, config, provisioning) take ~43.2 KB:
+// on 2026-09-08 an 83 408 B region had 40 248 B free at the ladder, and the
+// bench on 0c581fd (28 KB rung newly fitting) agrees. That leaves ~56 KB at
+// mpAllocHeap: 40 KB + the 12 KB reserve (BoardCaps::mpCHeapReserveKb) =
+// 52 KB fits with ~4 KB to spare, so the C heap keeps ~16 KB - the same
+// ~15.6 KB the 2026-09-08 session ran config saves and slot autosaves on.
+// 48 KB would need 60 KB and cannot fit. The ladder still self-corrects: if
+// a build's boot spends more, it takes 32 KB and says so on port 1.
+#define MICROPY_HEAP_SIZE       (40 * 1024)
+#define MICROPY_HEAP_SIZE_PSRAM (40 * 1024)
 #else
 #define MICROPY_HEAP_SIZE       (64 * 1024)  // SRAM heap when no PSRAM
 #define MICROPY_HEAP_SIZE_PSRAM  (64 * 1024)  // Smaller SRAM heap when PSRAM provides extra GC space

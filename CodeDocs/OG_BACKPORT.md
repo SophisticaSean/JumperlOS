@@ -1415,6 +1415,19 @@ OG (4095 on V5; `open()`/`read()` for more), `fs_listdir()` omits entries
 past its 768 B static buffer; `overlay_serialize()`'s 256 B is enough for
 the OG's single overlay slot.
 
+**Heap handed to Python (same branch):** OG `MICROPY_HEAP_SIZE` 28 -> 40 KB
+(`JumperlessDefines.h`). Sized from this build's linker map: the `.heap`
+region is 99 276 B; boot allocations are ~43.2 KB (2026-09-08: an 83 408 B
+region had 40 248 B free at the ladder; the 0c581fd bench, where 28 KB
+newly fit, agrees), so ~56 KB is free at `mpAllocHeap` and 40 + 12 KB
+reserve = 52 KB fits with ~4 KB margin, leaving the C heap the same ~16 KB
+that ran config saves + slot autosaves on 2026-09-08. 48 KB (60 KB needed)
+cannot fit. Every boot now prints `[MP] GC heap: N KB (M KB C heap left)`
+on port 1 (OG; V5 prints only when the configured size does not fit, as
+before), so the rung taken is on record; `X` still shows the ledger.
+Expected `gc.mem_free()` after import: ~22 752 + 12 288 = ~35 000.
+**Not yet measured on hardware.**
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).

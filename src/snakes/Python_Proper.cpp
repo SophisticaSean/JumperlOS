@@ -853,13 +853,20 @@ static bool mpAllocHeap(void) {
     mp_heap = p;
     mp_heap_size = sz;
     heapMark("MicroPython GC heap");
+    // Port 1, deliberately: a port-3-only message is invisible in the
+    // normal terminal, which is why the original failure took SWD to find.
+    // Always one line, so the rung actually taken is on record every boot.
     if (sz < configured) {
-      // Port 1, deliberately: a port-3-only message is invisible in the
-      // normal terminal, which is why the original failure took SWD to find.
       Serial.printf("[MP] GC heap: %d KB (configured %d KB doesn't fit; %d KB C heap left)\r\n",
           (int)(sz / 1024), (int)(configured / 1024),
           (int)(rp2040.getFreeHeap() / 1024));
     }
+#if defined(OG_JUMPERLESS)
+    else {
+      Serial.printf("[MP] GC heap: %d KB (%d KB C heap left)\r\n",
+          (int)(sz / 1024), (int)(rp2040.getFreeHeap() / 1024));
+    }
+#endif
     return true;
   }
   // Once. MpRemoteService retries this every service pass until it succeeds,
