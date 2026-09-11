@@ -1235,16 +1235,22 @@ const char* jl_get_path_info( int pathIdx ) {
 }
 
 // ── Bridge scratch buffers ──────────────────────────────────────────────────
-// The three big string-returning APIs (get_all_paths / fs_read /
-// overlay_serialize) used to keep permanent function-local static buffers
-// (~12 KB of .bss on V5). Their pointer contract is only "valid until the
-// next call", so each keeps ONE lazily-allocated heap block instead,
-// released at MicroPython teardown (jl_bridge_free_scratches, called from
-// deinitMicroPythonProper). A session that never calls an API never
-// allocates its buffer. Ownership stays on this side deliberately: a
-// malloc'd return freed by the MP wrapper would leak on any mp_obj_new_*
-// MemoryError (nlr_jump skips the free).
-static char* s_allPathsScratch = nullptr;
+// The big string-returning APIs (fs_read / overlay_serialize) used to keep
+// permanent function-local static buffers (~12 KB of .bss on V5). Their
+// pointer contract is only "valid until the next call", so each keeps ONE
+// lazily-allocated heap block instead, released at MicroPython teardown
+// (jl_bridge_free_scratches, called from deinitMicroPythonProper). A session
+// that never calls an API never allocates its buffer. Ownership stays on this
+// side deliberately: a malloc'd return freed by the MP wrapper would leak on
+// any mp_obj_new_* MemoryError (nlr_jump skips the free).
+// (get_all_paths had a third one; the OG's 1 KB cut its loop at ~15 of 60
+// paths with no sign of it, so the wrapper now builds the list from
+// get_path_info(i) and that buffer is gone.)
+// NOTE the same fixed-size pattern still truncates silently: fs_read() stops
+// at kFsReadSize-1 bytes (1023 on the OG, 4095 on V5 - use open()/read for
+// bigger files) and fs_listdir's static listBuffer (768 B on the OG) omits
+// entries past its end; overlay_serialize's 256 B on the OG is enough for
+// the single overlay slot the OG keeps.
 static char* s_fsReadScratch = nullptr;
 static char* s_overlayScratch = nullptr;
 
@@ -1255,51 +1261,8 @@ static char* bridgeScratch( char** slot, size_t size ) {
 }
 
 void jl_bridge_free_scratches( void ) {
-    free( s_allPathsScratch ); s_allPathsScratch = nullptr;
     free( s_fsReadScratch );   s_fsReadScratch = nullptr;
     free( s_overlayScratch );  s_overlayScratch = nullptr;
-}
-
-// Get all active paths as a formatted string
-// Returns count, followed by each path on a new line
-const char* jl_get_all_path_info( void ) {
-#if defined(OG_JUMPERLESS)
-    const size_t kAllPathsSize = 1024; // RP2040: scarce SRAM, fewer paths fit
-#else
-    const size_t kAllPathsSize = 4096; // Large buffer for multiple paths
-#endif
-    char* allPathsBuffer = bridgeScratch( &s_allPathsScratch, kAllPathsSize );
-    if ( allPathsBuffer == nullptr )
-        return "0\n"; // alloc failed: report zero paths (wrapper atoi's this)
-
-    // Note: Paths should already be computed by refreshLocalConnections()
-    // We don't recompute here to avoid unnecessary overhead
-    
-    int numPaths = globalState.connections.numPaths;
-    int numBridges = globalState.connections.numBridges;
-    int pos = 0;
-    
-    Serial.print( "jl_get_all_path_info: numBridges=" );
-    Serial.print( numBridges );
-    Serial.print( ", numPaths=" );
-    Serial.println( numPaths );
-
-    // First line: number of paths
-    pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos, "%d\n", numPaths );
-
-    // Each subsequent line: path info
-    for ( int i = 0; i < numPaths && pos < (int)kAllPathsSize - 256; i++ ) {
-        const pathStruct& path = globalState.connections.paths[ i ];
-        pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos,
-                         "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-                         path.node1, path.node2, path.net,
-                         path.chip[ 0 ], path.chip[ 1 ], path.chip[ 2 ], path.chip[ 3 ],
-                         path.x[ 0 ], path.x[ 1 ], path.x[ 2 ], path.x[ 3 ], path.x[ 4 ], path.x[ 5 ],
-                         path.y[ 0 ], path.y[ 1 ], path.y[ 2 ], path.y[ 3 ], path.y[ 4 ], path.y[ 5 ],
-                         path.duplicate );
-    }
-
-    return allPathsBuffer;
 }
 
 // Get path info for a connection between two specific nodes

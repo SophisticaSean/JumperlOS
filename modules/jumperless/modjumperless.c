@@ -149,7 +149,6 @@ int jl_get_bridge( int bridgeIdx, int* node1, int* node2, int* duplicates );
 // Fake GPIO path query functions
 int jl_get_num_paths( int include_duplicates );
 const char* jl_get_path_info( int pathIdx );
-const char* jl_get_all_path_info( void );
 const char* jl_get_path_between( int node1, int node2 );
 
 // Fast toggle functions
@@ -3210,70 +3209,22 @@ static mp_obj_t jl_get_num_paths_func( size_t n_args, const mp_obj_t* args ) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_get_num_paths_obj, 0, 1, jl_get_num_paths_func );
 
 // get_all_paths() - Returns list of all path dicts
+//
+// Built from get_path_info(i) for i in 0..get_num_paths(False)-1: one 512 B
+// static line per call on the C side, no scratch to run out of. It used to
+// parse one jl_get_all_path_info() string whose buffer stopped the C loop
+// early (1 KB on the OG: ~15 of 60 paths came back, silently), so the list
+// was neither complete nor honest. Same index range and line format as
+// get_path_info, so the two can never disagree.
 static mp_obj_t jl_get_all_paths_func( void ) {
-    const char* all_paths_str = jl_get_all_path_info( );
-    
-    // First line is count
-    int num_paths = atoi( all_paths_str );
-    if ( num_paths <= 0 ) {
-        return mp_obj_new_list( 0, NULL );
-    }
-    
-    // Create list to hold all path dicts
+    int num_paths = jl_get_num_paths( 0 ); // primary paths, the range get_path_info accepts
     mp_obj_t list = mp_obj_new_list( 0, NULL );
-    
-    // Parse each line
-    const char* p = all_paths_str;
-    // Skip first line (count)
-    while ( *p && *p != '\n' ) p++;
-    if ( *p == '\n' ) p++;
-    
-    for ( int i = 0; i < num_paths && *p; i++ ) {
-        // Parse this line's CSV
-        int vals[ 20 ];
-        int count = 0;
-        while ( *p && *p != '\n' && count < 20 ) {
-            vals[ count++ ] = atoi( p );
-            while ( *p && *p != ',' && *p != '\n' ) p++;
-            if ( *p == ',' ) p++;
-        }
-        if ( *p == '\n' ) p++;
-        
-        if ( count == 20 ) {
-            // Create dict for this path
-            mp_obj_t dict = mp_obj_new_dict( 7 );
-            
-            mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_node1 ), mp_obj_new_int( vals[ 0 ] ) );
-            mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_node2 ), mp_obj_new_int( vals[ 1 ] ) );
-            mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_net ), mp_obj_new_int( vals[ 2 ] ) );
-            
-            // Create chip array
-            mp_obj_t chips[ 4 ];
-            for ( int j = 0; j < 4; j++ ) {
-                chips[ j ] = mp_obj_new_int( vals[ 3 + j ] );
-            }
-            mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_chips ), mp_obj_new_list( 4, chips ) );
-            
-            // Create x array
-            mp_obj_t x_arr[ 6 ];
-            for ( int j = 0; j < 6; j++ ) {
-                x_arr[ j ] = mp_obj_new_int( vals[ 7 + j ] );
-            }
-            mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_x ), mp_obj_new_list( 6, x_arr ) );
-            
-            // Create y array
-            mp_obj_t y_arr[ 6 ];
-            for ( int j = 0; j < 6; j++ ) {
-                y_arr[ j ] = mp_obj_new_int( vals[ 13 + j ] );
-            }
-            mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_y ), mp_obj_new_list( 6, y_arr ) );
-            
-            mp_obj_dict_store( dict, MP_OBJ_NEW_QSTR( MP_QSTR_duplicate ), mp_obj_new_int( vals[ 19 ] ) );
-            
+    for ( int i = 0; i < num_paths; i++ ) {
+        mp_obj_t dict = jl_get_path_info_func( mp_obj_new_int( i ) );
+        if ( dict != mp_const_none ) {
             mp_obj_list_append( list, dict );
         }
     }
-    
     return list;
 }
 static MP_DEFINE_CONST_FUN_OBJ_0( jl_get_all_paths_obj, jl_get_all_paths_func );

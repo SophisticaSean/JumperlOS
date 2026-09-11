@@ -1390,6 +1390,31 @@ a node id into `nodes[]` other than `addNodeToNet` would need the same range
 guard; `MAX_NODES=64` grows `JsonState.cpp`'s `int nodes[MAX_NODES]` stack
 frame by 160 B (core 0).
 
+**Bench (coordinator, 0c581fd on the rev 2 board):** GND + all 60 rows +
+3 Nano pins = 64 nodes routes completely, the 65th is dropped as designed,
+corners fine, playbook and LED choreography pass. `gc.mem_free()` went
+18784 -> 22752, NOT +16.8 KB: the GC heap is a fixed rung allocation, not
+"whatever .bss leaves" - `mpAllocHeap` (`Python_Proper.cpp`) walks
+`{MICROPY_HEAP_SIZE, 64, 48, 32, 24, 16} KB` and takes the first rung that
+leaves `caps.mpCHeapReserveKb` (12 on the OG) of C heap. The OG's
+`MICROPY_HEAP_SIZE` is 28 KB (`JumperlessDefines.h`); before this branch the
+28 KB rung did not fit and the ladder landed on 24 KB, now it does (+4 KB
+= what the bench saw). The freed ~16.8 KB sits in the C heap; raising
+`MICROPY_HEAP_SIZE` (OG) is the knob that would hand it to Python -
+deliberately not touched here.
+
+**Follow-up (same branch):** `get_all_paths()` returned ~15 of 60 dicts on
+the OG with no sign of it - `jl_get_all_path_info` wrote into a 1 KB scratch
+and stopped its loop at size-256 (V5's 4 KB stops near ~75 paths too). The
+wrapper (`modules/jumperless/modjumperless.c`) now builds the list from
+`get_path_info(i)` for `i < get_num_paths(False)` - the same index range and
+line format, one 512 B static line at a time, no scratch - and the C
+function and its heap block are gone. Same fixed-buffer pattern still
+truncates silently elsewhere: `fs_read()` returns at most 1023 bytes on the
+OG (4095 on V5; `open()`/`read()` for more), `fs_listdir()` omits entries
+past its 768 B static buffer; `overlay_serialize()`'s 256 B is enough for
+the OG's single overlay slot.
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).
