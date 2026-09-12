@@ -171,12 +171,28 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   // path's crosspoints connect its two nodes. (The converse is not required:
   // an unrouted bridge's nodes may still meet through other bridges of the
   // net.) Tallied per case for the report.
+  // Both directions, per bridge, against the bridge's OWN primary path: close
+  // only that path's complete hops (what sendPath does) and ask whether they
+  // join its two nodes. clean <=> joined. (The whole-crossbar check above is
+  // the net-level truth; this is the per-bridge one get_netlist reports.)
   for (int i = 0; i < globalState.connections.numBridges; i++) {
     int a = globalState.connections.bridges[i][0], b = globalState.connections.bridges[i][1];
     bool unrouted = pathHealthBridgeUnrouted(i, numberOfPaths) != 0;
+    bool ownJoined = false;
+    for (int k = 0; k < numberOfPaths; k++) {
+      auto& p = globalState.connections.paths[k];
+      if (p.duplicate != 0 || p.skip) continue;
+      if (!((p.node1 == a && p.node2 == b) || (p.node1 == b && p.node2 == a))) continue;
+      UF own;
+      for (int h = 0; h < 4; h++) { if (p.chip[h] == -1 || p.x[h] < 0 || p.y[h] < 0) continue; own.u(laneName(p.chip[h], p.x[h]), yName_(p.chip[h], p.y[h])); }
+      ownJoined = own.p.count("node_" + nodeName(a)) && own.p.count("node_" + nodeName(b)) && own.f("node_" + nodeName(a)) == own.f("node_" + nodeName(b));
+      break;
+    }
     bool joined = uf.p.count("node_" + nodeName(a)) && uf.p.count("node_" + nodeName(b)) && uf.f("node_" + nodeName(a)) == uf.f("node_" + nodeName(b));
     healthBridges++; if (unrouted) healthUnrouted++;
-    if (!unrouted && !joined) { printf("  FAIL health: bridge %s-%s is CLEAN by the rule but its nodes are not joined\n", nodeName(a).c_str(), nodeName(b).c_str()); ok = false; }
+    if (!unrouted && !ownJoined) { printf("  FAIL health: bridge %s-%s is CLEAN by the rule but its own path does not join it\n", nodeName(a).c_str(), nodeName(b).c_str()); ok = false;
+      for (int k = 0; k < numberOfPaths; k++) { auto& p = globalState.connections.paths[k]; if ((p.node1 == a && p.node2 == b) || (p.node1 == b && p.node2 == a)) printf("    path %d: net %d chips %d,%d,%d,%d x %d,%d,%d,%d,%d,%d y %d,%d,%d,%d,%d,%d dup %d skip %d\n", k, (int)p.net, (int)p.chip[0], (int)p.chip[1], (int)p.chip[2], (int)p.chip[3], (int)p.x[0], (int)p.x[1], (int)p.x[2], (int)p.x[3], (int)p.x[4], (int)p.x[5], (int)p.y[0], (int)p.y[1], (int)p.y[2], (int)p.y[3], (int)p.y[4], (int)p.y[5], (int)p.duplicate, (int)p.skip); } }
+    if (unrouted && ownJoined) { printf("  FAIL health: bridge %s-%s is UNROUTED by the rule but its own path joins it\n", nodeName(a).c_str(), nodeName(b).c_str()); ok = false; }
     if (unrouted && joined) healthUnroutedButJoined++;
   }
   for (auto& d : defs) {
@@ -232,7 +248,7 @@ int main(int argc, char** argv) {
       int sh = 0, un = 0;
       if (!runCaseQ(defs, sh, un, t)) { fails++; if (sh) shortTrials++; if (argc > 4 && (sh || argc > 5)) { printf("seed %u trial %d FAILED:", seed, t); for (auto& d : defs) { printf(" net%d{", d.number); for (int x : d.nodes) printf("%s ", nodeName(x).c_str()); printf("}"); } printf("\n"); } }
     }
-    printf("random sweep seed=%u: %d/%d trials failed, %d with SHORTS; PathHealth: %ld bridges, %ld unrouted, 0 clean-but-open\n", seed, fails, total, shortTrials, healthBridges, healthUnrouted);
+    printf("random sweep seed=%u: %d/%d trials failed, %d with SHORTS; PathHealth: %ld bridges, %ld unrouted, rule == own-path truth both ways\n", seed, fails, total, shortTrials, healthBridges, healthUnrouted);
     return 0;
   }
   bool verbose = argc > 1; debugNTCC = verbose; debugNTCC2 = verbose;
@@ -396,6 +412,21 @@ int main(int argc, char** argv) {
     if (!ok) { printf("  seq:   %s\n  batch: %s\n", seqDigest.c_str(), batchDigest.c_str()); }
     fails += !ok;
   }
+  // The bench case that exposed the old rule: GND on all 60 rows + D0..D2
+  // (corner rows 1/30/31/60 route through chip L with a {chip,-1,y} stage
+  // 3), then ADC0 joining that net on row 45. Every bridge must route
+  // (the 64-node cap holds 64) and the rule must call every one clean.
+  { NetDef g{1, {GND}, {}}; for (int r = 1; r <= 60; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
+    for (int d = 0; d < 3; d++) { g.nodes.push_back(NANO_D0 + d); g.bridges.push_back({GND, NANO_D0 + d}); }
+    long u0 = healthUnrouted;
+    bool ok = runCase("11: GND on all 60 rows + D0..D2 (corners via L)", {g}, verbose);
+    ok = ok && (healthUnrouted - u0) == 0; if ((healthUnrouted - u0) != 0) printf("  FAIL: rule flagged %ld bridges unrouted\n", healthUnrouted - u0);
+    fails += !ok;
+    g.nodes.push_back(ADC0); g.bridges.push_back({ADC0, 45});
+    u0 = healthUnrouted;
+    ok = runCase("11b: ... + ADC0-45 into that net", {g}, verbose);
+    ok = ok && (healthUnrouted - u0) == 0; if ((healthUnrouted - u0) != 0) printf("  FAIL: rule flagged %ld bridges unrouted\n", healthUnrouted - u0);
+    fails += !ok; }
   // 30 two-row nets, top row r to bottom row 30+r: the densest plain netlist
   // (every chip lane in use); every bridge the rule calls clean is closed.
   // Like case 6 the crossbar may leave a link unrouted (it does: one of 30);
@@ -434,7 +465,7 @@ int main(int argc, char** argv) {
   known += !runCase("K3 (known): 3V3-ADC1 direct", {{6, {SUPPLY_3V3, ADC1}, {{SUPPLY_3V3, ADC1}}}}, verbose);
   printf("\n%d known-open direct SF->ADC1/ADC2 cases still unrouted (not counted)\n", known);
   fails += !runCase("S: 3V3-5 + 5-1 (works on hw)", {{6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
-  printf("\nPathHealth rule over all cases: %ld bridges, %ld unrouted, %ld of those still joined via other bridges, 0 clean-but-open (asserted)\n", healthBridges, healthUnrouted, healthUnroutedButJoined);
+  printf("\nPathHealth rule over all cases: %ld bridges, %ld unrouted, %ld of those still joined via other bridges; rule == own-path truth both ways (asserted)\n", healthBridges, healthUnrouted, healthUnroutedButJoined);
   printf("\n%d failing cases\n", fails);
   return fails ? 1 : 0;
 }

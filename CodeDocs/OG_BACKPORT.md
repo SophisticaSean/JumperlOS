@@ -1658,15 +1658,22 @@ and `get_all_paths()` exhausts the 40 KB heap at 60 paths. Three additions
   state): one string, one allocation, built on the C side into a growing
   vstr. Lines `<net>|<node>,...` for every net with two or more members,
   nodes by canonical name (`jl_get_node_name`, what `str(node(x))` prints),
-  then `unrouted|a-b,c-d,...` - every bridge with no clean path. The rule
-  lives in `routing/PathHealth.h` (Arduino-free): no primary path with the
-  bridge's nodes, a refused net (`net < 0`), a skipped path, or a used hop
-  (chip set) whose x or y is -1. **Host-checked against the crossbar model**
-  in every harness case and 4000 random trials: a bridge the rule calls
-  clean is always electrically closed (0 clean-but-open, asserted); on
-  two-node nets the rule's unrouted count equals the model's open-link
-  count (case 10: 30 top-bottom links r<->30+r - the OG crossbar routes 12
-  of 30, 18 open, rule 18).
+  then `unrouted|a-b,c-d,...` - every bridge with no clean path. Bench:
+  1 ms for 54 bridges, 2 ms for the 30 cross links. The rule lives in
+  `routing/PathHealth.h` (Arduino-free). Its first version ("every stage
+  with a chip must have x and y") had FALSE POSITIVES on hardware: GND on
+  all 60 rows flagged GND-1/30/31/60 while the ADC read them connected -
+  the corner-through-L shape legitimately ends `{chip, x -1, y}` and
+  `sendPath` simply skips a hop whose x or y is -1. The rule now (validated
+  on the bench with LEDs + ADC, and host-checked BOTH WAYS against the
+  crossbar model): stages 0 and 1 complete, stage 2 complete when its chip
+  is set, stage 3 never required, and -2 (the router's deferred sentinel)
+  anywhere = unrouted (the known-open direct supply->ADC1/ADC2 paths end
+  `{chip -1, x 9, y -2}`). Harness: for every bridge, close only its own
+  primary path's complete hops and ask whether they join its nodes; rule
+  clean <=> joined, asserted over every case (incl. GND on all 60 rows +
+  D0..D2 + ADC0-45, the P/K cases, the 30 cross links: 18 open by the
+  model, 18 by the rule) and 10 000 random trials.
 - **`connect_many(want=[(a,b),...])`**: replace semantics - the firmware
   diffs the requested set against its bridge table (pairs
   order-independent), removes user bridges not in want, adds want pairs
