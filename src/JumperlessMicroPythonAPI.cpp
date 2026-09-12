@@ -523,11 +523,7 @@ float jl_ina_get_power( int sensor ) {
     if ( sensor == 0 ) {
         result = INA0.getPower( );
     } else if ( sensor == 1 ) {
-#if defined(OG_JUMPERLESS)
-        result = 0.0f;
-#else
-        result = INA1.getPower( );
-#endif
+        result = INA1.getPower( );   // both boards carry INA1 (OG: the DAC-side 0x41)
     }
 
     return result;
@@ -1393,6 +1389,14 @@ int jl_nodes_clear( void ) {
     // waitCore2 is called internally by refreshConnections
 
     return 1;
+}
+
+// For the module's connect wrappers: does this node exist on the running
+// board? (FileParsing's isNodeValid: rows/GND always, everything else only
+// if the board descriptor's crossbar maps carry it.)
+int jl_node_is_valid( int node ) {
+    extern int isNodeValid( int node );
+    return isNodeValid( node ) == 1 ? 1 : 0;
 }
 
 int jl_nodes_is_connected( int node1, int node2 ) {

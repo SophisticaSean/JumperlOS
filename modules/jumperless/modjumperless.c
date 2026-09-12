@@ -97,6 +97,7 @@ void jl_gpio_claim_pin( int pin );
 void jl_gpio_release_pin( int pin );
 void jl_gpio_release_all_pins( void );
 int jl_nodes_connect( int node1, int node2, int save, int duplicates, int refresh );
+int jl_node_is_valid( int node );   // 1 = the node exists on this board (isNodeValid)
 int jl_nodes_disconnect( int node1, int node2, int refresh );
 int jl_nodes_fast_connect( int node1, int node2, int duplicates, int refresh );
 int jl_nodes_fast_disconnect( int node1, int node2, int refresh );
@@ -1839,6 +1840,14 @@ static mp_obj_t jl_dac_set_func( size_t n_args, const mp_obj_t* args ) {
     float voltage = mp_obj_get_float( args[ 1 ] );
     int save = ( n_args > 2 ) ? mp_obj_is_true( args[ 2 ] ) ? 1 : 0 : 1; // Default save=True
 
+#if defined(OG_JUMPERLESS)
+    // Channels 2/3 are the V5's DAC-driven rails. The OG's rails come off the
+    // DP3T supply switch; setTopRail()/setBotRail() only keep bookkeeping
+    // there, so a rail ask must not look like it worked.
+    if ( channel == 2 || channel == 3 ) {
+        mp_raise_ValueError( MP_ERROR_TEXT( "TOP_RAIL / BOTTOM_RAIL are set by the supply switch on this board, not by firmware" ) );
+    }
+#endif
     jl_dac_set( channel, voltage, save );
     return mp_const_none;
 }
@@ -1991,6 +2000,14 @@ static mp_obj_t jl_adc_get_func( mp_obj_t channel_obj ) {
     if ( channel < 0 || channel > 7 ) {
         mp_raise_ValueError( MP_ERROR_TEXT( "ADC channel must be 0-7" ) );
     }
+#if defined(OG_JUMPERLESS)
+    // The RP2040 has ADC inputs 0-3 on GPIO 26-29 (ADC0-2 0..5 V buffered,
+    // ADC3 -8.1..+8.24 V) and nothing else the board wires up: 4 is the die
+    // temperature sensor and 5-7 do not exist (AINSEL past 4 converts junk).
+    if ( channel > 3 ) {
+        mp_raise_ValueError( MP_ERROR_TEXT( "ADC channel must be 0-3 on this board (ADC0-2: 0..5 V, ADC3: -8.1..+8.24 V)" ) );
+    }
+#endif
 
     float voltage = jl_adc_get( channel );
 
@@ -2470,6 +2487,30 @@ static mp_obj_t jl_pwm_stop_func( mp_obj_t pin_obj ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_pwm_stop_obj, jl_pwm_stop_func );
 
+// A refused connect (addBridgeToState returned false) used to return None
+// exactly like a successful one, so `fast_connect(8, "TOP_RAIL")` on the OG
+// "worked" and connected nothing. On the OG it raises. The OG's rails are not
+// on the crossbar at all: rev 2/3 feed TOP_RAIL/BOTTOM_RAIL from the DP3T
+// supply switch (+3V3 / +5V / +-8V), and the routable supplies are 3V3, 5V
+// and GND (chips I/J/L). V5 behaviour unchanged.
+static void jl_check_connect_result( int ok, int node1, int node2 ) {
+#if defined(OG_JUMPERLESS)
+    if ( ok ) return;
+    int bad = !jl_node_is_valid( node1 ) ? node1 : ( !jl_node_is_valid( node2 ) ? node2 : -1 );
+    if ( bad == 101 || bad == 102 ) {
+        mp_raise_msg_varg( &mp_type_ValueError,
+            MP_ERROR_TEXT( "%s is not routable on this board: the OG rails are set by the supply switch (use 3V3, 5V or GND)" ),
+            bad == 101 ? "TOP_RAIL" : "BOTTOM_RAIL" );
+    }
+    if ( bad != -1 ) {
+        mp_raise_msg_varg( &mp_type_ValueError, MP_ERROR_TEXT( "node %d does not exist on this board" ), bad );
+    }
+    mp_raise_msg_varg( &mp_type_ValueError, MP_ERROR_TEXT( "connect %d-%d refused (not allowed, or part safety)" ), node1, node2 );
+#else
+    (void)ok; (void)node1; (void)node2;
+#endif
+}
+
 // Node Functions
 //
 // connect / disconnect / fast_connect / fast_disconnect take a keyword
@@ -2491,7 +2532,8 @@ static mp_obj_t jl_nodes_connect_func( size_t n_args, const mp_obj_t* pos_args, 
     mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
     int node1 = get_node_value( args[ 0 ].u_obj );
     int node2 = get_node_value( args[ 1 ].u_obj );
-    jl_nodes_connect( node1, node2, 0, args[ 2 ].u_int, args[ 3 ].u_bool ? 1 : 0 );  // save=0 (always use RAM state)
+    int ok = jl_nodes_connect( node1, node2, 0, args[ 2 ].u_int, args[ 3 ].u_bool ? 1 : 0 );  // save=0 (always use RAM state)
+    jl_check_connect_result( ok, node1, node2 );
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_connect_obj, 2, jl_nodes_connect_func );
@@ -2522,7 +2564,8 @@ static mp_obj_t jl_nodes_fast_connect_func( size_t n_args, const mp_obj_t* pos_a
     mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
     int node1 = get_node_value( args[ 0 ].u_obj );
     int node2 = get_node_value( args[ 1 ].u_obj );
-    jl_nodes_fast_connect( node1, node2, args[ 2 ].u_int, args[ 3 ].u_bool ? 1 : 0 );
+    int ok = jl_nodes_fast_connect( node1, node2, args[ 2 ].u_int, args[ 3 ].u_bool ? 1 : 0 );
+    jl_check_connect_result( ok, node1, node2 );
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_fast_connect_obj, 2, jl_nodes_fast_connect_func );

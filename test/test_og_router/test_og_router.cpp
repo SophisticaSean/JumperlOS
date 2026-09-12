@@ -350,6 +350,24 @@ int main(int argc, char** argv) {
     fails += !ok;
   }
   // sanity: the thing that works on hardware
+  // P: the peripheral nodes the 2026-09-11 bench used (the special-function
+  // X pins of chips I/J/K/L per the rev 2 PCB netlist: 5V on J14/L14, I+/I- on
+  // L1/L0, DAC0 on I12/L7, DAC1 on J12/L6, ADC0-3 on I13/J13/K15 + L2-L5).
+  fails += !runCase("P1: 5V-8 (supply node on J/L)", {{6, {SUPPLY_5V, 8}, {{SUPPLY_5V, 8}}}}, verbose);
+  fails += !runCase("P2: 3V3-I+ ; I- -12 ; GND-13 (INA loop)", {{6, {SUPPLY_3V3, ISENSE_PLUS}, {{SUPPLY_3V3, ISENSE_PLUS}}}, {7, {ISENSE_MINUS, 12}, {{ISENSE_MINUS, 12}}}, {1, {GND, 13}, {{GND, 13}}}}, verbose);
+  fails += !runCase("P3: DAC0-20 + ADC0-20 (DAC read back)", {{6, {DAC0, 20, ADC0}, {{DAC0, 20}, {ADC0, 20}}}}, verbose);
+  fails += !runCase("P4: DAC1-40 + ADC3-40", {{6, {DAC1, 40, ADC3}, {{DAC1, 40}, {ADC3, 40}}}}, verbose);
+  fails += !runCase("P5: GND-ADC3 ; 3V3-9-ADC2 ; 5V-12-ADC1 (SF to ADC through a row)",
+                    {{1, {GND, ADC3}, {{GND, ADC3}}}, {6, {SUPPLY_3V3, 9, ADC2}, {{SUPPLY_3V3, 9}, {9, ADC2}}}, {7, {SUPPLY_5V, 12, ADC1}, {{SUPPLY_5V, 12}, {12, ADC1}}}}, verbose);
+  // KNOWN (reported 2026-09-11, router untouched): a supply DIRECTLY to ADC1
+  // or ADC2 with no row in the net is left unrouted - the I->A->K three-chip
+  // path keeps a -2 Y position (see the v trace). Through a row it routes
+  // (P5). Counted separately so the harness stays green while it is open.
+  int known = 0;
+  known += !runCase("K1 (known): 3V3-ADC2 direct", {{6, {SUPPLY_3V3, ADC2}, {{SUPPLY_3V3, ADC2}}}}, verbose);
+  known += !runCase("K2 (known): GND-ADC2 direct", {{1, {GND, ADC2}, {{GND, ADC2}}}}, verbose);
+  known += !runCase("K3 (known): 3V3-ADC1 direct", {{6, {SUPPLY_3V3, ADC1}, {{SUPPLY_3V3, ADC1}}}}, verbose);
+  printf("\n%d known-open direct SF->ADC1/ADC2 cases still unrouted (not counted)\n", known);
   fails += !runCase("S: 3V3-5 + 5-1 (works on hw)", {{6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
   printf("\n%d failing cases\n", fails);
   return fails ? 1 : 0;

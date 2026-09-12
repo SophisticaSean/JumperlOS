@@ -243,6 +243,15 @@ bool addBridgeToState(int node1, int node2, int duplicates, bool autoRefresh) {
     bool success = globalState.addConnection(node1, node2, errorMsg, duplicates);
     
     if (!success) {
+#if defined(OG_JUMPERLESS)
+        // Say it every time, not only under debugFP: the OG's TOP_RAIL /
+        // BOTTOM_RAIL are fed by the DP3T supply switch (+3V3 / +5V / +-8V),
+        // not the crossbar, so a rail ask can only ever connect nothing.
+        // (isNodeValid() rejects them because no chip X/Y pin carries 101/102.)
+        if (node1 == TOP_RAIL || node1 == BOTTOM_RAIL || node2 == TOP_RAIL || node2 == BOTTOM_RAIL) {
+            Jerial.println("TOP_RAIL / BOTTOM_RAIL are not routable on this board: the rails are set by the supply switch. Use 3V3, 5V or GND.");
+        }
+#endif
         if (debugFP) {
             Jerial.print("addBridgeToState failed: ");
             Jerial.println(errorMsg);

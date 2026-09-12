@@ -1475,10 +1475,131 @@ hold and posts one clear-first nets show (`requestLedShow(-1)`).
   `PROFILE_FAST_REFRESH 1` in `Commands.cpp` prints the head wait
   ("wait for Core 2") per call, which is where the render pacing shows.
 
+### Session 2026-09-11 (3) — the OG special-function nodes on a **rev 2** board (branch `opt/og-routing-memory`)
+
+The 09-08 parity batch was measured on a **rev 3.1** PCB. Sean's board is a
+**rev 2** (`Hardware/KiCAD/Jumperless Rev 2`), and the two carry different
+analog parts; the reference firmware (1.3.22 `initDAC`) tells them apart at
+boot by probing I2C0 for the rev 2 DAC. Bench symptoms on rev 2 with 0709af4
+(MicroPython, `adc_get(0)` routed to each node): DAC0/DAC1 read GND after
+`dac_set`; `get_ina_current(0)` a constant 0.0 with `get_bus_voltage(0)` a
+constant 0.86; `adc_get(1)`/`adc_get(2)` a constant **9.28**; `SUPPLY_5V`
+indistinguishable from floating; `fast_connect(8, "TOP_RAIL")` silently
+connected nothing.
+
+**Rev 2 hardware, from the PCB netlist (pad nets of `Jumperless2.kicad_pcb`):**
+- DACs: **two MCP4725** single-channel I2C DACs on I2C0 (GPIO 4/5), VDD = +5 V
+  as their reference. U3 at **0x60** (A0 = GND) = DAC0 -> L272 unity follower
+  (U10 amp 1: +in pin 13, out 3 = -in 14) -> the DAC-side INA219's 2 ohm
+  shunt -> chip I X12 / chip L X7. U5 at **0x61** (A0 = +5V) = DAC1 -> L272
+  amp 2 (+in 12, -in 11, out 5 = `DAC_+-8V` on J X12 / L X6), a non-inverting
+  stage with feedback R16 47k + R20 68k and the ground leg R15 47k + R13 21k
+  returned to **+5 V**, so `Vout = 5 * (2.691 * code/4095 - 1.691)`: 0 V at
+  code **2573** (USB-voltage independent), 13.45 V per 4096 codes, code 0 =
+  -8.5 V nominal (past the -8 V rail), code 4095 = +5.0 V. The reference's
+  rev 2 DAC1 numbers (`dac1_8V(18.0)`, offset 1932 + 150) are not a voltage
+  map; these are design values - **unverified on the bench**.
+- INA219s: U4 at **0x40** (A1 = A0 = GND), IN+ = `CURR_SENSE+` = chip L X1
+  (`ISENSE_PLUS`), IN- = `CURR_SENSE-` = L X0 (`ISENSE_MINUS`), R1 2 ohm
+  across; U6 at 0x41 across the DAC0 output path. Same as rev 3.1.
+- ADC0-2: crossbar -> LM324 U7 unity (+/-9 V) -> 1k/2k divider (R6/R21 ...)
+  -> LM324 U11 unity (+/-8 V) -> GPIO 26/27/28: 5 V in = 3.33 V at the pin,
+  i.e. the reference's `raw * 5.0 / 4095`. ADC3: U7 -> R17 68k into the
+  R14 21k (+3V3) / R19 47k (GND) node -> U11 -> GPIO 29; the reference's
+  measured `raw * 16/4010 - 8.1` (= `raw * 16.34/4095 - 8.1`, -8.1..+8.24 V)
+  is kept - the schematic's nominal values give ~18.8 V/4096 with 0 V near
+  raw 2330, so **a GND / 3V3 / 5V point on ADC3 decides which** for a given
+  board.
+- Supplies on the crossbar: +3V3 on chip I X14 (`I1.1`), +5V on chip J X14
+  and L X14 (`J6.1`, `L1.1`), GND on I/J X15. `TOP_RAIL` / `BOTTOM_RAIL` are
+  fed ONLY by the DP3T supply switch SW2 (+8V / +5V / +3V3 top, -8V / +5V /
+  +3V3 bottom) - not on any CH446Q pin. The reference's chip L X8-X11 are the
+  corner rows TOP_1/TOP_30/BOTTOM_1/BOTTOM_30, not rails.
+
+**Root causes (file:line at 0709af4):**
+1. DACs read GND: `src/Peripherals.cpp:393-409` + `initDAC` 476-503 drove an
+   MCP4822 over SPI0 unconditionally on `caps.spiDac`; rev 2 has no SPI DAC,
+   the words went to CS/SCK/MOSI with nothing listening, and the two MCP4725s
+   stayed at their power-on 0 V. Fixed: `initDAC` probes I2C0 for 0x61 AND
+   0x60 like the reference; found -> `OG_DAC_MCP4725_I2C` (fast-mode 2-byte
+   writes, set-once), else the MCP4822 path as before. Boot prints
+   `OG DAC: 2x MCP4725 (I2C, rev 2) - DAC0 0.00..5.00 V, DAC1 -6.5..5.0 V`.
+2. `adc_get(1)/(2)` = 9.28 constant: `src/remembering/PersistentStuff.cpp:437-457`
+   `readSettingsFromConfig()` copies the config `[calibration]` block - whose
+   defaults are the V5's (`config.h:277-291`: adc zero 9.0, spread 18.28) -
+   over `adcSpread/adcZero` and `dacSpread/dacZero` on EVERY config reload or
+   save (`configManager.cpp` 920/1122/1285/1316/1637/2128/2296), i.e. after
+   `initADC()`'s descriptor copy. A floating buffered input then reads
+   `4095 * 18.28/4095 - 9.0 = 9.28`, and a DAC ask went to code
+   `V*4095/21.5 + 1650`. The 09-08 ADC fix only held until the first save.
+   Fixed: on the OG `readSettingsFromConfig()` calls
+   `ogApplyBoardCalibration()` (board constants, `og_analog.h`) and the config
+   calibration keys are inert; `$` was already refused on the OG.
+3. INA219 constant 0.0 / 0.86: no code fault found. 0x40 answers (0.86 V is a
+   real bus-voltage register read of a floating IN-, value 215 << 3), the
+   calibration register is written (`initINA219` 1101), and the host harness
+   routes `3V3-I+ ; I- -row ; GND-row` (case P2). `ina_get_current()` returns
+   **amps**: a crossbar loop is ~4 crosspoints each way (~65-100 ohm each), so
+   3V3 -> LED -> GND is ~2-3 mA = `0.0025`. A bus voltage that never leaves
+   0.86 with 3V3 on I+ means IN- saw nothing: check the I- side of the loop
+   first (below). The OG-only `ina_get_power(1)` zero stub is gone
+   (`JumperlessMicroPythonAPI.cpp`).
+4. 5V "floating": routes fine (harness P1: J X14 / L X14). On rev 2 the ADC0
+   reading saturates at 5.0 for anything >= ~4.15 V in (see the offset note),
+   so 5V and floating read alike on ADC0; read 5V on **ADC3** instead.
+5. `TOP_RAIL` / `BOTTOM_RAIL`: not on the crossbar (isNodeValid rejects 101/102,
+   `FileParsing.cpp:2051`), but `jl_nodes_connect_func` /
+   `jl_nodes_fast_connect_func` dropped the return code. Fixed (OG only): the
+   MicroPython `connect`/`fast_connect` raise `ValueError("TOP_RAIL is not
+   routable on this board: the OG rails are set by the supply switch (use 3V3,
+   5V or GND)")`, `dac_set(2|3, ...)` raises, every refused `addBridgeToState`
+   with a rail node prints the same line on serial (`FileParsing.cpp`).
+   `adc_get(4..7)` raises on the OG (RP2040: 4 = temperature, 5-7 absent).
+
+**Host checks:** `test/test_og_analog/run.sh` (new) pins `og_analog.h` to the
+reference's ADC maps, the rev 2 DAC1 L272 model, the rev 3 bench numbers and
+the descriptor (mutating a constant fails 279 checks).
+`test/test_og_router` gained P1-P5 (5V, INA loop, DAC0->row->ADC0,
+DAC1->row->ADC3, supplies -> row -> ADC1/2/3) and three **known-open** cases
+K1-K3, not counted: a supply DIRECTLY to ADC1 or ADC2 (no row in the net) is
+left unrouted - the I->A->K three-chip path keeps a -2 Y position
+(`./test_og_router v`, case K1). Through a row it routes. Router untouched
+per the brief; this is probably what "ADC1/ADC2 read a constant with anything
+routed" also hit when the ADC was bridged straight to 3V3/GND.
+
+**The rev 2 ADC0 offset (hardware, not fixed):** the reference firmware reads
+GND on ADC0 as 0.84 V on this board, and so does this build (raw ~690 = 0.55
+V at the pin, 0.85 V in input terms) - 3V3 reads ~4.2, so the map is
+`reading = Vin + 0.85`, saturating at ~4.15 V in. The rev 3.1 board read GND
+as 0.05. Same firmware, same formula, so it is the U11/U7 buffer chain on
+this unit (or an unpowered U11: +8V/-8V via JP4/JP8/D64/D69). A DMM on TP9
+(`ADC 0 IN`) vs GPIO 26 with GND routed says which stage. The 1.3.22 scaling
+is kept as asked; a per-board zero is NOT invented.
+
+**Bench expectations (rev 2, this build):** `adc_get(0)` GND ~0.84, 3V3
+~4.2, 5V 5.00 (saturated); `adc_get(3)` GND ~0.0, 3V3 ~3.3, 5V ~5.0 within
+the reference map's error (if it reads ~-1.3 / ~2.2 / ~4.0 the schematic
+model is the right one - report it); `dac_set(0, 2.5)` -> row -> `adc_get(0)`
+~3.35 (= 2.5 + the 0.85 offset) or 2.5 on ADC3; `dac_set(1, 0.0)` -> ADC3 ~0,
+`dac_set(1, 3.0)` ~3.0, `dac_set(1, -3.0)` ~-3.0; INA: `3V3 -> I_P`, `I_N ->
+1k -> GND` gives `get_bus_voltage(0)` ~2.0 and `get_ina_current(0)` ~0.002
+(A); with the LED, current ~0.002-0.003 and bus ~1.8-2.0 (LED forward
+voltage) - a bus voltage stuck at 0.86 means the I_N side is open.
+`fast_connect(8, "TOP_RAIL")` -> ValueError. `dac_get` still reports what was
+asked, not a read-back.
+
+**Build:** `jumperless_og` RAM 61.5 % (161256 B), flash 1.90 MB;
+`.pio/build/jumperless_og/firmware.uf2`. V5 env builds (the new code is
+runtime-gated on `caps.spiDac` / `OG_JUMPERLESS`).
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).
-- [x] 4 ADCs scaled from the descriptor (ADC3 ±8 V), both INA219s (2026-09-08).
+- [x] rev 2 `2x MCP4725` I2C DAC backend, auto-detected at boot like the
+      reference (2026-09-11; DAC1 map from the schematic, bench pending).
+- [x] 4 ADCs scaled from the descriptor (ADC3 ±8 V), both INA219s (2026-09-08);
+      constants no longer clobbered by the config `[calibration]` block
+      (2026-09-11, `og_analog.h` + `test/test_og_analog`).
 - [ ] 3 routable GPIO + single routable `NANO_RESET` (UART pins are right now;
       `RP_GPIO_0` routing itself untested; the UART node naming is a design call).
 - [x] Scanning probe ported from the OG reference firmware (2026-09-07,

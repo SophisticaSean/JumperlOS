@@ -38,6 +38,7 @@
 
 #include "MCP4728.h"  // New library
 #include "boards/board.h"   // caps.spiDac / railsFirmwareControlled
+#include "boards/og/og_analog.h"   // OG ADC/DAC transfer constants (pure, host-tested)
 #include "hardware/spi.h"
 #include "WaveGen.h"  // wavegen.isRunning() - shared I2C0 bus arbitration
 #include "AdcRing.h"  // the always-on ADC ring (T2.1): readAdc() reads it when active
@@ -384,23 +385,124 @@ MCP4728 mcp;
 INA219 INA0( 0x40 );
 INA219 INA1( 0x41 );
 
-// The SPI DAC of a BoardCaps::spiDac board (the OG): an MCP4822 on SPI0 - rev
-// 3.1 PCB netlist (Hardware/KiCAD): GPIO 1 = CSn, 2 = SCK, 3 = MOSI; LDAC is
-// tied to GND, so an output updates on the CS rising edge. Channel A drives
-// DAC0 (0-5 V after the L272 stage), channel B DAC1 (+/-8 V). Only SCK and
-// MOSI are muxed to SPI: GPIO 0 (SPI0 RX) is the routable RP_GPIO_0 node.
+// The DAC of a BoardCaps::spiDac board (the OG). Two PCB revisions run this
+// build and they carry DIFFERENT DAC parts - the reference firmware (1.3.22
+// initDAC) tells them apart the same way, by probing I2C0 for the rev 2 part:
+//
+//   rev 2   (Hardware/KiCAD/Jumperless Rev 2): TWO MCP4725 single-channel
+//           I2C DACs on I2C0 (GPIO 4/5, shared with both INA219s). U3 at 0x60
+//           (A0 = GND) is DAC0: VDD = +5 V is its reference, output through
+//           an L272 unity follower (and the DAC-side INA219's 2 ohm shunt) to
+//           the crossbar - 0..5 V, code = V * 4095 / 5. U5 at 0x61 (A0 = +5V)
+//           is DAC1: its 0..5 V drives the L272's second amp, a non-inverting
+//           stage with feedback R16+R20 = 115k and the ground leg R15+R13 =
+//           68k returned to +5 V (not GND), so
+//               Vout = 2.691 * Vdac - 1.691 * V5  = V5 * (2.691 * code/4095 - 1.691)
+//           i.e. 0 V at code 2573 whatever the USB voltage, and 13.45 V per
+//           4096 codes at V5 = 5.0 (design values from the schematic; the
+//           reference firmware's rev 2 DAC1 numbers are not a voltage map).
+//           The stage runs on +/-8 V, so the usable output is about
+//           -6.5..+5 V (code 0 = -8.5 V nominal is past the negative rail).
+//   rev 3.x (Hardware/KiCAD/JumperlessRev3point1): an MCP4822 dual DAC on
+//           SPI0 - GPIO 1 = CSn, 2 = SCK, 3 = MOSI; LDAC is tied to GND, so an
+//           output updates on the CS rising edge. Channel A drives DAC0
+//           (unity from the 4.096 V full scale), channel B DAC1 (16 V per
+//           4096 codes, 0 V at code 1772 - measured 2026-09-08). Only SCK and
+//           MOSI are muxed to SPI: GPIO 0 (SPI0 RX) is the routable RP_GPIO_0.
+//
+// Both go through the shared "code = V * 4095 / dacSpread + dacZero" formula
+// of setDac0voltage()/setDac1voltage(); ogApplyBoardCalibration() owns those
+// constants for the OG (the config file's [calibration] block is the V5's and
+// is NOT applied on this board - see readSettingsFromConfig()).
+enum OgDacKind { OG_DAC_NONE = 0, OG_DAC_MCP4822_SPI, OG_DAC_MCP4725_I2C };
+static OgDacKind s_ogDacKind = OG_DAC_NONE;
 static const uint OG_DAC_CS_PIN = 1, OG_DAC_SCK_PIN = 2, OG_DAC_MOSI_PIN = 3;
+static const uint8_t OG_MCP4725_ADDR[ 2 ] = { 0x60, 0x61 };   // DAC0, DAC1
 static bool s_ogDacReady = false;
+static int s_ogDacLastCode[ 2 ] = { -1, -1 };
+
+const char* ogDacBackendName( void ) {
+    switch ( s_ogDacKind ) {
+    case OG_DAC_MCP4822_SPI: return "MCP4822 (SPI, rev 3)";
+    case OG_DAC_MCP4725_I2C: return "2x MCP4725 (I2C, rev 2)";
+    default: return "none detected";
+    }
+}
+int ogDacBackendKind( void ) { return (int)s_ogDacKind; }
+
 // One MCP4822 word (datasheet 5.1): bit 15 = channel (0 A / 1 B), bit 13 = GA
 // (1 = 1x, 0 = 2x - the reference firmware runs 2x), bit 12 = active, 11:0 data.
-static void ogDacWrite( int channel, int code ) {
-    if ( !s_ogDacReady ) return;
-    if ( code < 0 ) code = 0;
-    if ( code > 4095 ) code = 4095;
+static void ogDacWriteMcp4822( int channel, int code ) {
     uint16_t word = (uint16_t)( ( channel ? 0x8000u : 0u ) | 0x1000u | ( (unsigned)code & 0x0FFFu ) );
     gpio_put( OG_DAC_CS_PIN, 0 );
     spi_write16_blocking( spi0, &word, 1 );
     gpio_put( OG_DAC_CS_PIN, 1 );
+}
+// MCP4725 "fast mode" write (datasheet 6.1.1): two bytes, C2:C1 = 00 and
+// PD1:PD0 = 00 in the top nibble, then D11..D0. Register only (no EEPROM
+// write - the reference firmware's setVoltage/setInputCode do the same).
+static bool ogDacWriteMcp4725( int channel, int code ) {
+    Wire.beginTransmission( OG_MCP4725_ADDR[ channel ] );
+    Wire.write( (uint8_t)( ( code >> 8 ) & 0x0F ) );
+    Wire.write( (uint8_t)( code & 0xFF ) );
+    return Wire.endTransmission( ) == 0;
+}
+static void ogDacWrite( int channel, int code ) {
+    if ( !s_ogDacReady || channel < 0 || channel > 1 ) return;
+    if ( code < 0 ) code = 0;
+    if ( code > 4095 ) code = 4095;
+    if ( s_ogDacKind == OG_DAC_MCP4822_SPI ) {
+        ogDacWriteMcp4822( channel, code );
+        s_ogDacLastCode[ channel ] = code;
+    } else if ( s_ogDacKind == OG_DAC_MCP4725_I2C ) {
+        // Set-once, like the V5's cached MCP4728 write: the probe-feed park
+        // re-asks the same word on every rebuild.
+        if ( s_ogDacLastCode[ channel ] == code ) return;
+        if ( ogDacWriteMcp4725( channel, code ) ) {
+            s_ogDacLastCode[ channel ] = code;
+        } else {
+            s_ogDacLastCode[ channel ] = -1;   // retry next time
+        }
+    }
+}
+// Is there an MCP4725 at this address? (ACK on an empty transaction, the
+// reference firmware's begin() check.)
+static bool ogI2cAck( uint8_t addr ) {
+    Wire.beginTransmission( addr );
+    return Wire.endTransmission( ) == 0;
+}
+
+// The OG's analog transfer constants (og_analog.h): the descriptor's ADC
+// ranges and the detected DAC part's code map. initADC()/initDAC() call it,
+// and so does readSettingsFromConfig(): the config file's [calibration]
+// block holds the V5's numbers (adc zero 9.0 / spread 18.28, dac zero 1650 /
+// spread 21.5) and used to be applied over these on every config reload or
+// save - ADC1/2 then read a floating (full-scale) input as
+// 4095 * 18.28 / 4095 - 9.0 = 9.28 V, and a DAC ask went to the wrong code.
+// There is no user calibration on the OG ('$' is refused), so the board's
+// constants are the only source.
+void ogApplyBoardCalibration( void ) {
+    const board::BoardTopology& b = board::currentBoard( );
+    for ( int i = 0; i < b.adcCount; i++ ) {
+        int ch = b.adc[ i ].node - ADC0;
+        if ( ch < 0 || ch >= 4 ) continue;
+        // The descriptor and og_analog::kAdc say the same thing; the test
+        // checks that. Read from the descriptor so one table drives both the
+        // JSON and the conversion.
+        adcSpread[ ch ] = b.adc[ i ].maxV - b.adc[ i ].minV;
+        adcZero[ ch ] = -b.adc[ i ].minV;
+        adcRange[ ch ][ 0 ] = b.adc[ i ].minV;
+        adcRange[ ch ][ 1 ] = b.adc[ i ].maxV;
+        adcReadingRanges[ ch ][ 0 ] = b.adc[ i ].minV;
+        adcReadingRanges[ ch ][ 1 ] = b.adc[ i ].maxV;
+    }
+    if ( s_ogDacKind != OG_DAC_NONE ) {
+        for ( int ch = 0; ch < 2; ch++ ) {
+            ogAnalog::Transfer t = ogAnalog::dacTransfer( (ogAnalog::DacKind)s_ogDacKind, ch );
+            dacSpread[ ch ] = t.spread;
+            dacZero[ ch ] = (int)t.zero;
+        }
+    }
 }
 
 uint16_t count;
@@ -437,24 +539,15 @@ void initADC( void ) {
     adc_run( false );
 
     #if (OG_JUMPERLESS)
-        // Re-enable ADC GPIO pins for normal operation
+    // Re-enable ADC GPIO pins for normal operation. adc_gpio_init() also
+    // drops the pulls and the digital input buffer on 26-29.
     for ( int i = 0; i < 4; i++ ) {
         adc_gpio_init( 26 + i ); // Jumperless ADCs on pins 26-29
     }
-    // The scaling comes from the board descriptor's ADC ranges (board_og.cpp):
-    // readAdcVoltage() is raw * spread / 4095 - zero. The static tables above
-    // are the V5's calibration and read this board's 0-5 V buffers as +/-9 V.
-    {
-        const board::BoardTopology& b = board::currentBoard( );
-        for ( int i = 0; i < b.adcCount; i++ ) {
-            int ch = b.adc[ i ].node - ADC0;
-            if ( ch < 0 || ch >= 8 ) continue;
-            adcSpread[ ch ] = b.adc[ i ].maxV - b.adc[ i ].minV;
-            adcZero[ ch ] = -b.adc[ i ].minV;
-            adcRange[ ch ][ 0 ] = b.adc[ i ].minV;
-            adcRange[ ch ][ 1 ] = b.adc[ i ].maxV;
-        }
-    }
+    // The scaling: ogApplyBoardCalibration() (og_analog.h). The static tables
+    // above are the V5's calibration and read this board's 0-5 V buffers as
+    // +/-9 V.
+    ogApplyBoardCalibration( );
     #else
 
 
@@ -474,27 +567,44 @@ void initDAC( void ) {
     initGPIO( );
 
     if ( board::currentBoard( ).caps.spiDac ) {
-        // MCP4822 on SPI0 (see ogDacWrite). 8 MHz is well inside the part's
-        // 20 MHz; 16-bit frames, mode 0.
-        spi_init( spi0, 8 * 1000 * 1000 );
-        spi_set_format( spi0, 16, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST );
-        gpio_set_function( OG_DAC_SCK_PIN, GPIO_FUNC_SPI );
-        gpio_set_function( OG_DAC_MOSI_PIN, GPIO_FUNC_SPI );
-        gpio_init( OG_DAC_CS_PIN );
-        gpio_put( OG_DAC_CS_PIN, 1 );
-        gpio_set_dir( OG_DAC_CS_PIN, GPIO_OUT );
+        // Which OG is this? The reference firmware (1.3.22 initDAC) decides
+        // by probing I2C0 for the rev 2 MCP4725 at 0x61; do the same, and
+        // require both parts so a lone ACK from something else can't pick
+        // the I2C path. I2C0 (GPIO 4/5) is the INA219s' bus on every OG;
+        // initINA219() re-begins it later (a no-op while running) at the
+        // same 400 kHz - the MCP4725 is a 400 kHz part too.
+        Wire.setSDA( 4 );
+        Wire.setSCL( 5 );
+        Wire.setClock( 400000 );
+        Wire.begin( );
+        delayMicroseconds( 200 );
+        bool mcp4725 = ogI2cAck( OG_MCP4725_ADDR[ 1 ] ) && ogI2cAck( OG_MCP4725_ADDR[ 0 ] );
+        if ( mcp4725 ) {
+            s_ogDacKind = OG_DAC_MCP4725_I2C;
+            revisionNumber = 2;
+        } else {
+            // MCP4822 on SPI0 (see ogDacWriteMcp4822). 8 MHz is well inside
+            // the part's 20 MHz; 16-bit frames, mode 0.
+            s_ogDacKind = OG_DAC_MCP4822_SPI;
+            revisionNumber = 3;
+            spi_init( spi0, 8 * 1000 * 1000 );
+            spi_set_format( spi0, 16, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST );
+            gpio_set_function( OG_DAC_SCK_PIN, GPIO_FUNC_SPI );
+            gpio_set_function( OG_DAC_MOSI_PIN, GPIO_FUNC_SPI );
+            gpio_init( OG_DAC_CS_PIN );
+            gpio_put( OG_DAC_CS_PIN, 1 );
+            gpio_set_dir( OG_DAC_CS_PIN, GPIO_OUT );
+        }
         // Code mapping, through the same dacSpread/dacZero the V5 path uses
-        // (code = V * 4095 / spread + zero), measured 2026-09-08 through the
-        // crossbar into the calibrated ADCs: DAC0 is unity from the
-        // MCP4822's 4.096 V full scale; DAC1's L272 stage gives 16 V per 4096
-        // codes with 0 V at code 1772 (+1.08 V at mid-scale) and saturates
-        // near +7 V. (The reference firmware's V*4095/5 and +2048 were
-        // nominal: 18 % low on DAC0, +1.1 V off on DAC1.)
-        dacSpread[ 0 ] = 4.096f;
-        dacZero[ 0 ] = 0;
-        dacSpread[ 1 ] = 16.0f;
-        dacZero[ 1 ] = 1772;
+        // (code = V * 4095 / spread + zero): og_analog.h, per detected part.
+        ogApplyBoardCalibration( );
         s_ogDacReady = true;
+        Serial.printf( "OG DAC: %s - DAC0 %.2f..%.2f V, DAC1 %.1f..%.1f V\n\r",
+                       ogDacBackendName( ),
+                       ogAnalog::dacMinVolts( (ogAnalog::DacKind)s_ogDacKind, 0 ),
+                       ogAnalog::dacMaxVolts( (ogAnalog::DacKind)s_ogDacKind, 0 ),
+                       ogAnalog::dacMinVolts( (ogAnalog::DacKind)s_ogDacKind, 1 ),
+                       ogAnalog::dacMaxVolts( (ogAnalog::DacKind)s_ogDacKind, 1 ) );
         // The saved state's DAC voltages, as setRailsAndDACs() applies them on
         // the I2C path below; the rails are a hardware switch on this board.
         setDac0voltage( globalState.power.dac0, 0, 0 );
