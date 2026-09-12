@@ -1428,6 +1428,53 @@ before), so the rung taken is on record; `X` still shows the ledger.
 Expected `gc.mem_free()` after import: ~22 752 + 12 288 = ~35 000.
 **Not yet measured on hardware.**
 
+**Deferred row-LED repaint (same branch): `refresh=False` / `leds_hold()` /
+`leds_flush()`.** Measured over USB, a connect that changes visible row LEDs
+cost ~85 ms against ~5 ms of on-board work. Reading the path: neither
+`connect()` (`refreshLocalConnections(1,1,0)`) nor `fast_connect()`
+(`fastRefresh`) waits for a LED paint - both post the crosspoint send
+(`REQ_BYPASS`) and return, and the nets show is async. The pacing is
+indirect: core 1 serves a posted send only at the top of `loop1`, so a send
+posted while core 1 is inside its nets render (`showNets` + `readGPIO` +
+`readFakeGPIO` + measurements + `leds.show`, one pass per scheduler tick)
+waits for that render, and the NEXT call's head wait (`while (core2busy ||
+!allIdle())`) then waits for the send. Option (c) exactly: while
+`ledRepaintHeld` (`Commands.cpp`) is up, core 1's LED branch skips the nets
+render (`main.cpp` loop1: the request stays posted, a menu/graphics flush
+still runs), so a send is served on the next pass; nothing became
+asynchronous and the mailbox handshake is untouched. `ledsFlush()` drops the
+hold and posts one clear-first nets show (`requestLedShow(-1)`).
+- API (`modules/jumperless/modjumperless.c`, both boards): `connect(a, b,
+  duplicates=-1, *, refresh=True)`, `disconnect(a, b, *, refresh=True)`,
+  `fast_connect(a, b, duplicates=-1, *, refresh=True)`, `fast_disconnect(a,
+  b, *, refresh=True)`, `leds_hold()`, `leds_flush() -> generation`,
+  `leds_held() -> bool`. Five qstrs hand-added to
+  `qstrdefs.generated.h` (hash + sort verified per Building_Native_Module.md).
+- Guarantees on return, either `refresh`: netlist updated + re-routed on
+  core 0; the crosspoint send is POSTED to core 1 and completes on its next
+  free pass; the next connect/disconnect/refresh waits for it at its head, so
+  calls never interleave on the crossbar (this is what fast_connect always
+  did - the send was never awaited). `refresh=True`: a repaint is posted
+  (connect) or left to core 1's periodic render (fast_connect), and any hold
+  is released with one show. `refresh=False`: LEDs held, strip keeps its last
+  frame until `leds_flush()` / the next `refresh=True` call. `connect(...,
+  refresh=False)` runs the same rebuild with `ledShowOption` 0 - the send is
+  identical (`JumperlessMicroPythonAPI.cpp` jl_nodes_*).
+- Caveats: a script that forgets `leds_flush()` leaves the strip stale
+  (also the logo swirl and the probe/GPIO LED feedback the nets render
+  carries); MicroPython teardown (`jl_bridge_free_scratches`) flushes a
+  forgotten hold, and any `refresh=True` call does too. A terminal `+`
+  during a script's hold rebuilds and routes but does not paint until the
+  flush. `leds_flush()` is asynchronous like every show.
+- Proof: harness case 8 - one rebuild per call (the way `fast_connect`
+  rebuilds) closes the same crosspoints as one rebuild of the whole batch,
+  so a hold that touched routing would fail it; 21/21 on the host. The hold
+  itself cannot run on the host (no core 1). **Timing NOT measured here**
+  (no board): measure `time.ticks_diff` around 30 back-to-back
+  `fast_connect(..., refresh=True)` vs `refresh=False` + one `leds_flush()`;
+  `PROFILE_FAST_REFRESH 1` in `Commands.cpp` prints the head wait
+  ("wait for Core 2") per call, which is where the render pacing shows.
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).

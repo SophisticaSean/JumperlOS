@@ -21,6 +21,12 @@ uint32_t requestLedShow( int legacyValue );
 bool ledShowIdle( void );
 // True while staged graphics (mode 3) own the strip.
 bool ledGraphicsOwned( void );
+// Deferred row-LED repaint: while held, core 1 skips the nets render so a
+// batch of connects is not paced by it; flush drops the hold and posts one
+// nets show (returns its generation, async - see Commands.cpp).
+extern volatile bool ledRepaintHeld;
+void ledsHold( void );
+uint32_t ledsFlush( void );
 // For X: the pending bits of the LED slot.
 uint32_t ledShowPendingBits( void );
 // For X: the last 16 LED requests core 1 took (main.cpp fills, X prints).

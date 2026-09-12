@@ -68,6 +68,7 @@ bool infraIsBridge(int, int) { return false; }
 void assignTermColor(int) {}
 void printBridgeArray(Stream*) {}
 static bool digest = false;   // print the closed crosspoints per case/trial (compare two builds)
+static std::string lastDigest; // the closed crosspoints of the last runCase
 static std::string nodeName(int n) {
   switch (n) {
     case GND: return "GND"; case SUPPLY_3V3: return "3V3"; case SUPPLY_5V: return "5V";
@@ -160,7 +161,8 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
       std::string a = laneName(p.chip[h], p.x[h]), b = yName_(p.chip[h], p.y[h]); uf.u(a, b);
       char cp[16]; snprintf(cp, sizeof cp, "%c%d.%d", 'A' + p.chip[h], (int)p.x[h], (int)p.y[h]); closed.insert(cp); }
   }
-  if (digest) { printf("  DIGEST paths=%d:", (int)numberOfPaths); for (auto& c : closed) printf(" %s", c.c_str()); printf("\n"); }
+  lastDigest.clear(); for (auto& c : closed) { lastDigest += c; lastDigest += ' '; }
+  if (digest) { printf("  DIGEST paths=%d: %s\n", (int)numberOfPaths, lastDigest.c_str()); }
   bool ok = true;
   for (auto& d : defs) {
     std::string root = uf.f("node_" + nodeName(d.nodes[0]));
@@ -323,6 +325,30 @@ int main(int argc, char** argv) {
   { NetDef g{1, {GND}, {}}; for (int r : {2, 3, 9, 10, 16, 17, 23, 24, 33, 34, 40, 41, 47, 48, 54, 55}) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
     g.nodes.push_back(31); g.bridges.push_back({GND, 31});
     fails += !runCase("5: GND on 2 rows of every chip + 31 (corner via same-net lanes)", {g}, verbose); }
+  // Batching (connect(refresh=False) ... leds_flush()): the hold only skips
+  // core 1's LED render; every call still rebuilds and posts the same
+  // crosspoint send. So the crossbar after N calls must equal ONE rebuild of
+  // the same netlist - route each prefix of the list (a rebuild per call, the
+  // way fast_connect does) and require the final digest to match the
+  // all-at-once digest. A hold that changed routing would show up here.
+  {
+    std::vector<std::pair<int,int>> adds = {{GND, 4}, {GND, 5}, {SUPPLY_3V3, 20}, {20, 21}, {ADC0, 31}, {GND, 30}, {DAC0, 60}, {21, 22}};
+    auto build = [&](size_t n) {
+      std::vector<NetDef> defs; NetDef g{1, {GND}, {}}, v{6, {SUPPLY_3V3}, {}}, a{7, {ADC0}, {}}, d{8, {DAC0}, {}};
+      for (size_t i = 0; i < n; i++) { auto b = adds[i];
+        NetDef* t = (b.first == GND) ? &g : (b.first == SUPPLY_3V3 || b.first == 20 || b.first == 21) ? &v : (b.first == ADC0) ? &a : &d;
+        t->bridges.push_back(b); t->nodes.push_back(b.second); }
+      for (NetDef* t : {&g, &v, &a, &d}) if (!t->bridges.empty()) defs.push_back(*t);
+      return defs;
+    };
+    fflush(stdout); int saved = dup(1); FILE* tmp = tmpfile(); dup2(fileno(tmp), 1);
+    std::string stepwise; for (size_t n = 1; n <= adds.size(); n++) { runCase("batch step", build(n), false); stepwise = lastDigest; }
+    runCase("batch all", build(adds.size()), false); std::string once = lastDigest;
+    fflush(stdout); dup2(saved, 1); close(saved); fclose(tmp);
+    bool ok = stepwise == once && !once.empty();
+    printf("\n=== 8: one rebuild per call == one rebuild of the batch (crosspoints) ===\n  %zu calls -> %s\n  %s\n", adds.size(), once.c_str(), ok ? "PASS" : "FAIL");
+    fails += !ok;
+  }
   // sanity: the thing that works on hardware
   fails += !runCase("S: 3V3-5 + 5-1 (works on hw)", {{6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
   printf("\n%d failing cases\n", fails);

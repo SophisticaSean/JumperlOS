@@ -3966,6 +3966,9 @@ connect = _native.connect
 disconnect = _native.disconnect
 fast_connect = _native.fast_connect
 fast_disconnect = _native.fast_disconnect
+leds_hold = _native.leds_hold
+leds_flush = _native.leds_flush
+leds_held = _native.leds_held
 nodes_clear = _native.nodes_clear
 is_connected = _native.is_connected
 nodes_save = _native.nodes_save
@@ -4740,6 +4743,7 @@ __all__ = [
     
     # Node Connection Functions
     'node', 'connect', 'disconnect', 'fast_connect', 'fast_disconnect', 'nodes_clear', 'is_connected',
+    'leds_hold', 'leds_flush', 'leds_held',
     'nodes_save', 'nodes_discard', 'nodes_has_changes',
     
     # Net Information Functions
@@ -4886,7 +4890,7 @@ __all__ = [
     'gpio_set_read_floating', 'gpio_get_read_floating',
     'set_gpio_read_floating', 'get_gpio_read_floating',
     'gpio_claim_pin', 'gpio_release_pin', 'gpio_release_all_pins',
-    'fast_connect', 'fast_disconnect',
+    'fast_connect', 'fast_disconnect', 'leds_hold', 'leds_flush', 'leds_held',
     'set_net_color_hsv', 'get_all_nets',
     'get_num_paths', 'get_path_info', 'get_all_paths', 'get_path_between',
     'get_node_voltage', 'get_net_current', 'get_path_current',
@@ -5340,8 +5344,13 @@ def node(name_or_id: Union[str, int, Node]) -> Node:
     """Create a node object from string name or integer ID"""
     ...
 
-def connect(node1: NodeRef, node2: NodeRef, duplicates: int = -1) -> None:
+def connect(node1: NodeRef, node2: NodeRef, duplicates: int = -1, *, refresh: bool = True) -> None:
     """Connect two nodes
+    
+    On return (whatever `refresh` is): the netlist is updated and re-routed,
+    and the crosspoint send is posted to core 1. It completes on core 1's next
+    free pass; the next connect/disconnect waits for it before touching the
+    crossbar, so calls never interleave.
     
     Args:
         node1, node2: Nodes to connect (int, string, or Node constant)
@@ -5349,46 +5358,83 @@ def connect(node1: NodeRef, node2: NodeRef, duplicates: int = -1) -> None:
             -1: Just add the connection (standard behavior, no duplicate management)
             0: Force exactly 0 duplicates (remove any existing duplicates)
             1+: Force exactly N duplicates (add/remove connections to reach count)
+        refresh: True (default) also posts a row-LED repaint (and releases a
+            hold left by an earlier refresh=False call). False HOLDS the
+            row LEDs: core 1 skips its nets render, so a batch of calls is
+            not paced by it, and the strip keeps its last frame until
+            leds_flush() or the next refresh=True call posts one repaint.
     
     Example:
         connect(1, 5)              # Add connection without managing duplicates
         connect(1, 5, duplicates=0)  # Ensure no duplicate paths exist
         connect(1, 5, duplicates=2)  # Force exactly 2 duplicate paths
+        for r in range(1, 31):
+            connect("GND", r, refresh=False)   # crossbar programmed, LEDs held
+        leds_flush()                            # one repaint for the batch
     """
     ...
 
-def disconnect(node1: NodeRef, node2: NodeRef) -> None:
-    """Disconnect two nodes (set node2 to -1 to disconnect all from node1)"""
+def disconnect(node1: NodeRef, node2: NodeRef, *, refresh: bool = True) -> None:
+    """Disconnect two nodes (set node2 to -1 to disconnect all from node1)
+    
+    `refresh` as in connect(): False holds the row LEDs until leds_flush().
+    """
     ...
 
-def fast_connect(node1: NodeRef, node2: NodeRef, duplicates: int = -1) -> None:
-    """Connect two nodes, skipping LED computation
+def fast_connect(node1: NodeRef, node2: NodeRef, duplicates: int = -1, *, refresh: bool = True) -> None:
+    """Connect two nodes with the lighter rebuild (no duplicate-path fill, no
+    colour work)
     
-    This function adds connections without updating LED state. Useful when making
-    many connections at once - you can defer LED updates until all connections are done.
-    
-    Note: This is not much faster overall, it just skips LED updates for bulk operations.
+    Same guarantee as connect(): on return the netlist is re-routed and the
+    crosspoint send is posted to core 1 (completes on its next free pass; the
+    next call waits for it). The row LEDs follow on core 1's own periodic
+    nets render - unless refresh=False holds them.
     
     Args:
         node1, node2: Nodes to connect (int, string, or Node constant)
         duplicates: Same behavior as connect() (default: -1)
+        refresh: False = hold the row-LED repaint (core 1 skips its nets
+            render, so back-to-back calls are not paced by it); the strip
+            keeps its last frame until leds_flush() or a refresh=True call.
     
     Example:
-        # Make multiple connections without LED updates
         for i in range(10):
-            fast_connect(i, i+10)
-        # LEDs update automatically after loop completes
+            fast_connect(i, i+10, refresh=False)
+        leds_flush()   # one repaint for all ten
     """
     ...
 
-def fast_disconnect(node1: NodeRef, node2: NodeRef) -> None:
-    """Disconnect two nodes, skipping LED computation
+def fast_disconnect(node1: NodeRef, node2: NodeRef, *, refresh: bool = True) -> None:
+    """Disconnect two nodes with the lighter rebuild
     
-    Same LED-skipping behavior as fast_connect(). Useful for bulk disconnections.
+    Same as fast_connect() for removal; `refresh=False` holds the row LEDs
+    until leds_flush().
     
     Args:
         node1, node2: Nodes to disconnect
     """
+    ...
+
+def leds_hold() -> None:
+    """Hold the row-LED repaint
+    
+    Core 1 skips its nets render while held (a menu or graphics flush still
+    runs), so a crosspoint send posted mid-batch is served on the next pass
+    instead of after a render. The strip keeps its last frame - stale until
+    leds_flush(). connect(..., refresh=False) is this plus the connect.
+    """
+    ...
+
+def leds_flush() -> int:
+    """Drop the hold and post ONE clear-first row-LED repaint
+    
+    Always posts (held or not). Returns the show's generation; the repaint is
+    asynchronous, like every LED show - it lands on core 1's next pass.
+    """
+    ...
+
+def leds_held() -> bool:
+    """True while the row-LED repaint is held (leds_hold / refresh=False)"""
     ...
 
 def nodes_clear() -> None:

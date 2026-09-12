@@ -96,10 +96,13 @@ int jl_gpio_get_floating_read( int pin );
 void jl_gpio_claim_pin( int pin );
 void jl_gpio_release_pin( int pin );
 void jl_gpio_release_all_pins( void );
-int jl_nodes_connect( int node1, int node2, int save, int duplicates );
-int jl_nodes_disconnect( int node1, int node2 );
-int jl_nodes_fast_connect( int node1, int node2, int duplicates );
-int jl_nodes_fast_disconnect( int node1, int node2 );
+int jl_nodes_connect( int node1, int node2, int save, int duplicates, int refresh );
+int jl_nodes_disconnect( int node1, int node2, int refresh );
+int jl_nodes_fast_connect( int node1, int node2, int duplicates, int refresh );
+int jl_nodes_fast_disconnect( int node1, int node2, int refresh );
+void jl_leds_hold( void );
+int jl_leds_flush( void );
+int jl_leds_held( void );
 int jl_nodes_is_connected( int node1, int node2 );
 int jl_nodes_save( int slot );
 int jl_nodes_print_bridges( void );
@@ -2468,43 +2471,88 @@ static mp_obj_t jl_pwm_stop_func( mp_obj_t pin_obj ) {
 static MP_DEFINE_CONST_FUN_OBJ_1( jl_pwm_stop_obj, jl_pwm_stop_func );
 
 // Node Functions
-static mp_obj_t jl_nodes_connect_func( size_t n_args, const mp_obj_t* args ) {
-    int node1 = get_node_value( args[ 0 ] );
-    int node2 = get_node_value( args[ 1 ] );
-    int duplicates = ( n_args > 2 ) ? mp_obj_get_int( args[ 2 ] ) : -1; // Default -1 = use global config
-
-    jl_nodes_connect( node1, node2, 0, duplicates );  // save=0 (always use RAM state)
+//
+// connect / disconnect / fast_connect / fast_disconnect take a keyword
+// `refresh` (default True). On return, whatever `refresh` is: the netlist is
+// updated and re-routed, and the crosspoint send is posted to core 1 (it
+// completes on core 1's next free pass; the next call waits for it before it
+// touches the crossbar, so calls never interleave). refresh=False only HOLDS
+// the row-LED repaint: core 1 skips its nets render, so a batch of calls is
+// not paced by it, and the strip keeps its last frame until leds_flush() or
+// the next refresh=True call posts one repaint. See JumperlessMicroPythonAPI.cpp.
+static mp_obj_t jl_nodes_connect_func( size_t n_args, const mp_obj_t* pos_args, mp_map_t* kw_args ) {
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_node1,      MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_node2,      MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_duplicates, MP_ARG_INT,  { .u_int = -1 } },   // -1 = use global config
+        { MP_QSTR_refresh,    MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = true } },
+    };
+    mp_arg_val_t args[ MP_ARRAY_SIZE( allowed_args ) ];
+    mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
+    int node1 = get_node_value( args[ 0 ].u_obj );
+    int node2 = get_node_value( args[ 1 ].u_obj );
+    jl_nodes_connect( node1, node2, 0, args[ 2 ].u_int, args[ 3 ].u_bool ? 1 : 0 );  // save=0 (always use RAM state)
     return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_nodes_connect_obj, 2, 3, jl_nodes_connect_func );
+static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_connect_obj, 2, jl_nodes_connect_func );
 
-static mp_obj_t jl_nodes_disconnect_func( mp_obj_t node1_obj, mp_obj_t node2_obj ) {
-    int node1 = get_node_value( node1_obj );
-    int node2 = get_node_value( node2_obj );
-
-    jl_nodes_disconnect( node1, node2 );
+static mp_obj_t jl_nodes_disconnect_func( size_t n_args, const mp_obj_t* pos_args, mp_map_t* kw_args ) {
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_node1,   MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_node2,   MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_refresh, MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = true } },
+    };
+    mp_arg_val_t args[ MP_ARRAY_SIZE( allowed_args ) ];
+    mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
+    int node1 = get_node_value( args[ 0 ].u_obj );
+    int node2 = get_node_value( args[ 1 ].u_obj );
+    jl_nodes_disconnect( node1, node2, args[ 2 ].u_bool ? 1 : 0 );
     return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_2( jl_nodes_disconnect_obj, jl_nodes_disconnect_func );
+static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_disconnect_obj, 2, jl_nodes_disconnect_func );
 
-static mp_obj_t jl_nodes_fast_connect_func( size_t n_args, const mp_obj_t* args ) {
-    int node1 = get_node_value( args[ 0 ] );
-    int node2 = get_node_value( args[ 1 ] );
-    int duplicates = ( n_args > 2 ) ? mp_obj_get_int( args[ 2 ] ) : -1; // Default -1 = allow duplicates
-
-    jl_nodes_fast_connect( node1, node2, duplicates );
+static mp_obj_t jl_nodes_fast_connect_func( size_t n_args, const mp_obj_t* pos_args, mp_map_t* kw_args ) {
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_node1,      MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_node2,      MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_duplicates, MP_ARG_INT,  { .u_int = -1 } },   // -1 = allow duplicates
+        { MP_QSTR_refresh,    MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = true } },
+    };
+    mp_arg_val_t args[ MP_ARRAY_SIZE( allowed_args ) ];
+    mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
+    int node1 = get_node_value( args[ 0 ].u_obj );
+    int node2 = get_node_value( args[ 1 ].u_obj );
+    jl_nodes_fast_connect( node1, node2, args[ 2 ].u_int, args[ 3 ].u_bool ? 1 : 0 );
     return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN( jl_nodes_fast_connect_obj, 2, 3, jl_nodes_fast_connect_func );
+static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_fast_connect_obj, 2, jl_nodes_fast_connect_func );
 
-static mp_obj_t jl_nodes_fast_disconnect_func( mp_obj_t node1_obj, mp_obj_t node2_obj ) {
-    int node1 = get_node_value( node1_obj );
-    int node2 = get_node_value( node2_obj );
-
-    jl_nodes_fast_disconnect( node1, node2 );
+static mp_obj_t jl_nodes_fast_disconnect_func( size_t n_args, const mp_obj_t* pos_args, mp_map_t* kw_args ) {
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_node1,   MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_node2,   MP_ARG_REQUIRED | MP_ARG_OBJ, { .u_obj = MP_OBJ_NULL } },
+        { MP_QSTR_refresh, MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = true } },
+    };
+    mp_arg_val_t args[ MP_ARRAY_SIZE( allowed_args ) ];
+    mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
+    int node1 = get_node_value( args[ 0 ].u_obj );
+    int node2 = get_node_value( args[ 1 ].u_obj );
+    jl_nodes_fast_disconnect( node1, node2, args[ 2 ].u_bool ? 1 : 0 );
     return mp_const_none;
 }
-static MP_DEFINE_CONST_FUN_OBJ_2( jl_nodes_fast_disconnect_obj, jl_nodes_fast_disconnect_func );
+static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_fast_disconnect_obj, 2, jl_nodes_fast_disconnect_func );
+
+// leds_hold(): hold the row-LED repaint (core 1 skips its nets render; the
+// strip keeps its last frame). leds_flush(): drop the hold and post ONE
+// clear-first nets repaint for everything since; returns its generation.
+// leds_held(): True while held. The `refresh=False` keyword is these two
+// wrapped around one call.
+static mp_obj_t jl_leds_hold_func( void ) { jl_leds_hold( ); return mp_const_none; }
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_leds_hold_obj, jl_leds_hold_func );
+static mp_obj_t jl_leds_flush_func( void ) { return mp_obj_new_int( jl_leds_flush( ) ); }
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_leds_flush_obj, jl_leds_flush_func );
+static mp_obj_t jl_leds_held_func( void ) { return mp_obj_new_bool( jl_leds_held( ) ); }
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_leds_held_obj, jl_leds_held_func );
 
 static mp_obj_t jl_nodes_clear_func( void ) {
     jl_nodes_clear( );
@@ -6779,6 +6827,9 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_disconnect ), MP_ROM_PTR( &jl_nodes_disconnect_obj ) },
     { MP_ROM_QSTR( MP_QSTR_fast_connect ), MP_ROM_PTR( &jl_nodes_fast_connect_obj ) },
     { MP_ROM_QSTR( MP_QSTR_fast_disconnect ), MP_ROM_PTR( &jl_nodes_fast_disconnect_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_leds_hold ), MP_ROM_PTR( &jl_leds_hold_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_leds_flush ), MP_ROM_PTR( &jl_leds_flush_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_leds_held ), MP_ROM_PTR( &jl_leds_held_obj ) },
     { MP_ROM_QSTR( MP_QSTR_nodes_clear ), MP_ROM_PTR( &jl_nodes_clear_obj ) },
     { MP_ROM_QSTR( MP_QSTR_is_connected ), MP_ROM_PTR( &jl_nodes_is_connected_obj ) },
     { MP_ROM_QSTR( MP_QSTR_nodes_save ), MP_ROM_PTR( &jl_nodes_save_obj ) },

@@ -1261,6 +1261,9 @@ static char* bridgeScratch( char** slot, size_t size ) {
 }
 
 void jl_bridge_free_scratches( void ) {
+    // MicroPython teardown: a script that ended (or was killed) with the
+    // row-LED repaint held must not leave the strip frozen.
+    if ( ledRepaintHeld ) ledsFlush( );
     free( s_fsReadScratch );   s_fsReadScratch = nullptr;
     free( s_overlayScratch );  s_overlayScratch = nullptr;
 }
@@ -1301,62 +1304,75 @@ const char* jl_get_path_between( int node1, int node2 ) {
     return pathBuffer;
 }
 
-// Node Functions
-int jl_nodes_connect( int node1, int node2, int save, int duplicates ) {
+// ── Node Functions ──────────────────────────────────────────────────────────
+// What each call guarantees on return (both boards, unchanged by `refresh`):
+//   * the netlist is updated and re-routed on core 0 (bridgesToPaths);
+//   * the crosspoint send is POSTED to core 1 (REQ_BYPASS). It completes on
+//     core 1's next free pass; the next connect/disconnect/refresh waits for
+//     it at its head before touching the path arrays, so calls never
+//     interleave on the crossbar. It is not awaited here - that is how
+//     fast_connect has always worked (Commands.cpp fastRefresh).
+// What `refresh` changes is only the row-LED repaint:
+//   * refresh=True (default): the strip repaints - connect() posts a nets
+//     show, fast_connect() leaves it to core 1's periodic nets render - and
+//     any hold a previous refresh=False left is released with one show.
+//   * refresh=False: the LEDs are HELD (ledsHold): core 1 skips its nets
+//     render, so the crosspoint send is served immediately instead of after
+//     a render, and the strip keeps its last frame until leds_flush() (or the
+//     next refresh=True call) posts ONE repaint for the whole batch.
+static void ledsAfterConnect( int refresh ) {
+    if ( refresh ) {
+        if ( ledRepaintHeld ) ledsFlush( );
+    } else {
+        ledsHold( );
+    }
+}
 
-    // Add to RAM state
+int jl_nodes_connect( int node1, int node2, int save, int duplicates, int refresh ) {
+    (void)save;
     // duplicates: -1 = allow, 0 = no duplicates, 1+ = allow N duplicates
-    bool ok = addBridgeToState( node1, node2, duplicates, true );
-
-    // Update shown readings to detect current sense connections
-    // This enables the marching ants animation when ISENSE_PLUS/MINUS are connected
-    //chooseShownReadings( );
-
+    // addBridgeToState(autoRefresh=true) is refreshLocalConnections(1,1,0): the
+    // same rebuild with a nets show posted. refresh=False runs it with the
+    // show left out (ledShowOption 0) - the crosspoint send is identical.
+    bool ok = addBridgeToState( node1, node2, duplicates, refresh != 0 );
+    if ( ok && !refresh ) refreshLocalConnections( 0, 1, 0 );
+    if ( ok ) ledsAfterConnect( refresh );
     return ok ? 1 : 0;   // 0 = refused (part_safety) or not added
 }
 
-int jl_nodes_disconnect( int node1, int node2 ) {
-    // Remove from RAM state
-    removeBridgeFromState( node1, node2, true );
-
-    // Update shown readings to detect current sense disconnections
-    //chooseShownReadings( );
-
+int jl_nodes_disconnect( int node1, int node2, int refresh ) {
+    // autoRefresh=true is refreshLocalConnections(-1,1,0) when something was
+    // removed (clear-first nets show); refresh=False does the same rebuild
+    // without the show, and leds_flush() posts the clear-first show later.
+    bool removed = removeBridgeFromState( node1, node2, refresh != 0 );
+    if ( removed && !refresh ) refreshLocalConnections( 0, 1, 0 );
+    ledsAfterConnect( refresh );
     return 1;
 }
 
-int jl_nodes_fast_connect( int node1, int node2, int duplicates ) {
-    // OPTIMIZATION: Fast connection with immediate refresh
-    // Uses fastRefresh() instead of full refresh for minimal latency
-    
-    // Add to RAM state
-    // duplicates: -1 = allow, 0 = no duplicates, 1+ = allow N duplicates
+int jl_nodes_fast_connect( int node1, int node2, int duplicates, int refresh ) {
+    // Fast connection: fastRefresh() (no duplicate-path fill, no colour work)
+    // posts the crosspoint send and returns; LEDs follow on core 1's own
+    // nets render unless held.
     bool ok = addBridgeToState( node1, node2, duplicates, false );
-
-    // Update shown readings to detect current sense connections
-    // chooseShownReadings( );
-    
-    // Fast refresh with immediate hardware update (bypasses Core 2 scheduler)
-    fastRefresh( 1 );  // 1 = show LEDs after refresh
-
+    fastRefresh( 1 );
+    ledsAfterConnect( refresh );
     return ok ? 1 : 0;
 }
 
-int jl_nodes_fast_disconnect( int node1, int node2 ) {
-    // OPTIMIZATION: Fast disconnection with immediate refresh
-    // Uses fastRefresh() instead of full refresh for minimal latency
-    
-    // Remove from RAM state
+int jl_nodes_fast_disconnect( int node1, int node2, int refresh ) {
     removeBridgeFromState( node1, node2, false );
-
-    // Update shown readings to detect current sense disconnections
-    // chooseShownReadings( );
-    
-    // Fast refresh with immediate hardware update (bypasses Core 2 scheduler)
-    fastRefresh( 1 );  // 1 = show LEDs after refresh
-
+    fastRefresh( 1 );
+    ledsAfterConnect( refresh );
     return 1;
 }
+
+// leds_hold() / leds_flush() / leds_held(): the same hold, driven by hand.
+// flush always posts one nets show (held or not) and returns its generation,
+// so a script can end a batch with a known repaint.
+void jl_leds_hold( void ) { ledsHold( ); }
+int jl_leds_flush( void ) { return (int)ledsFlush( ); }
+int jl_leds_held( void ) { return ledRepaintHeld ? 1 : 0; }
 
 int jl_nodes_clear( void ) {
     // Hold core-1 frames BEFORE modifying state to prevent race conditions

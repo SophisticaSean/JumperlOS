@@ -1953,9 +1953,15 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 
         // (a pending path send goes first: the LED branch waits for the SEND
         // slots to be idle, exactly as it waited for sendAllPathsCore2 == 0)
+        // ledRepaintHeld (leds_hold / connect(refresh=False)): skip the nets
+        // render - the request stays posted (a peek is not a take) and the
+        // swirl-only pass is skipped too - so a crosspoint send posted mid-batch
+        // is served on the next pass. A menu/graphics flush is interactive and
+        // still runs. leds_flush() drops the hold and posts the one repaint.
         if ( ( ( ledPending && ( loadingFile == 0 || ( ledBits & core1req::LED_GFX ) ) ) ||
                ( swirled == 1 && !ledGraphicsOwned( ) ) ) &&
-             core1req::allIdle( ) ) {
+             core1req::allIdle( ) &&
+             !( ledRepaintHeld && !ledImmediate ) ) {
 
             // Take the request now (its bits are cleared; anything posted while
             // we render stays pending for the next pass - the old
