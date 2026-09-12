@@ -1592,6 +1592,43 @@ asked, not a read-back.
 `.pio/build/jumperless_og/firmware.uf2`. V5 env builds (the new code is
 runtime-gated on `caps.spiDac` / `OG_JUMPERLESS`).
 
+**The ~80 ms after every fast_connect is the slot auto-save, not the
+render (same branch, from the coordinator's fixture: a fast_connect on an
+EXISTING bridge - no routing change, no LED change - cost the same 86 ms;
+`refresh=False` did not help; the 80 ms is appended after the script no
+matter what follows; the next readback exec paid it too).** Cause, three
+parts: (1) `JumperlessState::addConnection` (States.cpp) on an existing pair
+called `markDirty()` even with `duplicates=-1` (nothing changed);
+(2) `systemIdleForFlush()` gates the slot auto-save on 750 ms since
+`lastUserInputMs`, which only port-1 commands, the encoder and the probe
+bump - raw-REPL bytes never did, so a script that dirtied the slot was
+"idle" the instant it ended and `SlotManager` ran `saveActiveSlot`
+(toYAML + FatFS write on FS_TINY + flash erase/program with interrupts
+masked, core 1 parked) right behind the reply; (3) `fast_connect` on an
+existing bridge rebuilt and re-sent every path anyway. Fixes: a plain
+re-add no longer dirties the slot (only an explicit, changed duplicate
+count does); `MpRemoteService` calls `noteUserInput()` for every raw-REPL
+batch, so the auto-save waits for a 750 ms quiet window like every other
+input (a script that dirtied the slot is saved 750 ms after the last REPL
+byte - if a fixture streams commands for minutes, the save waits for the
+first pause); `connect/disconnect/fast_connect/fast_disconnect` return
+without a rebuild when the pair already is / is not a bridge
+(`duplicates<0`) - the crossbar already matches the netlist. A connect that
+changes something now costs the rebuild + the crosspoint send only.
+Also: the ONE nets render after a routing change skips the GPIO /
+fake-GPIO / measurement scans (`main.cpp` loop1, keyed on
+`routingGeneration`); they run on the next pass, a tick later.
+**`debug.repl_timing`** (new config flag, `tubes/ReplTiming.cpp`) prints one
+line per raw-REPL exec on port 1: reply flushed -> tx-complete on the wire
+(`tud_cdc_tx_complete_cb`), core 1's render window with per-stage us
+(nets / gpio+fake / meas / anim+overlays / show), and any auto-save window -
+whatever sits between "done" and "wire" is what the host waited on. Turn it
+on for the fixture; it costs a few volatile stamps otherwise. **Not
+measured here (no board)** - expected: change_refresh and ops_nochange
+drop to the REPL floor + the crosspoint send (a few ms), with `[replt]`
+showing `save -1..-1` on every line until the 750 ms quiet window.
+Harness: 21/21, crosspoint digest byte-identical to 117bb11.
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).

@@ -1324,8 +1324,19 @@ static void ledsAfterConnect( int refresh ) {
     }
 }
 
+// A call that changes nothing costs nothing: connecting a pair that is
+// already a bridge (with no explicit duplicate count) or disconnecting one
+// that is not does no rebuild and posts no send - the crossbar already is
+// what the netlist says. (It used to rebuild and re-send every path, and
+// addConnection dirtied the slot, so a no-op fast_connect cost a full
+// rebuild plus an ~80 ms auto-save on the OG.)
+static bool connectIsNoop( int node1, int node2, int duplicates ) {
+    return duplicates < 0 && globalState.hasConnection( node1, node2 );
+}
+
 int jl_nodes_connect( int node1, int node2, int save, int duplicates, int refresh ) {
     (void)save;
+    if ( connectIsNoop( node1, node2, duplicates ) ) return 1;
     // duplicates: -1 = allow, 0 = no duplicates, 1+ = allow N duplicates
     // addBridgeToState(autoRefresh=true) is refreshLocalConnections(1,1,0): the
     // same rebuild with a nets show posted. refresh=False runs it with the
@@ -1341,7 +1352,8 @@ int jl_nodes_disconnect( int node1, int node2, int refresh ) {
     // removed (clear-first nets show); refresh=False does the same rebuild
     // without the show, and leds_flush() posts the clear-first show later.
     bool removed = removeBridgeFromState( node1, node2, refresh != 0 );
-    if ( removed && !refresh ) refreshLocalConnections( 0, 1, 0 );
+    if ( !removed ) return 1;
+    if ( !refresh ) refreshLocalConnections( 0, 1, 0 );
     ledsAfterConnect( refresh );
     return 1;
 }
@@ -1350,14 +1362,17 @@ int jl_nodes_fast_connect( int node1, int node2, int duplicates, int refresh ) {
     // Fast connection: fastRefresh() (no duplicate-path fill, no colour work)
     // posts the crosspoint send and returns; LEDs follow on core 1's own
     // nets render unless held.
+    if ( connectIsNoop( node1, node2, duplicates ) ) return 1;
     bool ok = addBridgeToState( node1, node2, duplicates, false );
+    if ( !ok ) return 0;   // refused: nothing changed, nothing to send
     fastRefresh( 1 );
     ledsAfterConnect( refresh );
-    return ok ? 1 : 0;
+    return 1;
 }
 
 int jl_nodes_fast_disconnect( int node1, int node2, int refresh ) {
-    removeBridgeFromState( node1, node2, false );
+    bool removed = removeBridgeFromState( node1, node2, false );
+    if ( !removed ) return 1;   // nothing to remove: nothing to send
     fastRefresh( 1 );
     ledsAfterConnect( refresh );
     return 1;

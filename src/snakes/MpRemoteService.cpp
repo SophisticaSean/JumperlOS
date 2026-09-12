@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "MpRemoteService.h"
+#include "ReplTiming.h"
 #include "Debugs.h"
 #include "ArduinoStuff.h"  // For USBSer2
 #include "Python_Proper.h" // For MicroPython execution
@@ -130,6 +131,7 @@ ServiceStatus MpRemoteService::service( ) {
         return m_in_raw_repl ? ServiceStatus::BUSY : ServiceStatus::IDLE;
     }
     s_in_service = true;
+    replt::service( );   // debug.repl_timing: print the last exec's reply timeline once it has landed
 
     static bool repl_initialized = false;
 
@@ -195,10 +197,12 @@ ServiceStatus MpRemoteService::service( ) {
     // Process characters one at a time using event-driven REPL
     // This is non-blocking and allows us to service other things
     int processed_count = 0;
+    bool sawExecEnd = false;   // a raw-mode Ctrl-D (exec) was fed this batch
     while ( USBSer2.available( ) && processed_count < 8192 ) { // Process max 8192 chars per service call
         int c = USBSer2.read( );
         if ( c < 0 )
             break;
+        if ( m_in_raw_repl && c == 0x04 ) sawExecEnd = true;
 
         if ( m_debug || printReceivedPython ) {
             if (c < 0x20) {
@@ -307,8 +311,17 @@ ServiceStatus MpRemoteService::service( ) {
     // parse_compile_execute() writes these via mp_hal_stdout_tx_strn() which does
     // NO flush — bytes can sit in the CDC TX buffer indefinitely without this.
     if (processed_count > 0) {
+        // Raw-REPL traffic IS user input: systemIdleForFlush() gates the slot
+        // auto-save (a flash write with interrupts masked, ~80 ms on the OG)
+        // on a 750 ms quiet window measured from lastUserInputMs, and only
+        // port-1 commands / encoder / probe used to bump it - so a script
+        // that dirtied the slot got the auto-save appended to its own reply.
+        noteUserInput( );
         USBSer2.flush();
         yield();  // mutex-guarded pump + CDC flush: ensure the transfer actually happens
+        // debug.repl_timing: a raw-REPL exec just completed in this batch (its
+        // \x04\x04> markers are in the FIFO / on the wire) - stamp "done".
+        if ( m_in_raw_repl && sawExecEnd ) replt::execDone( 2 /* USBSer2 = CDC instance 2 */ );
     }
 
     // CRITICAL: Handle soft reset requests from the native REPL

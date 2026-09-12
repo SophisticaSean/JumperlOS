@@ -22,6 +22,7 @@
 #include "FileCache.h"  // fileCacheFlushNowAll() big-event triggers
 #include "Undo.h"  // Phase 4.1 - undo log mutation hooks
 #include "InfraPaths.h"  // infraIsBridge / infraScrubLoadedBridges / system allowance
+#include "ReplTiming.h"  // debug.repl_timing auto-save stamps
 
 // ============================================================================
 // CRITICAL MEMORY SAFETY NOTES
@@ -627,11 +628,17 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
             // touching an existing pair with the probe silently spent another
             // lane on it - and now that -1 means "default", an increment would
             // have turned a default into an explicit 0.
-            if (duplicates >= 0) {
+            // Nothing changed unless the count did: a plain re-add must not
+            // dirty the slot. It did, and every dirty mark is a slot
+            // auto-save the moment the board looks idle - toYAML + a FatFS
+            // write + a flash erase/program with interrupts masked, ~80 ms
+            // on the OG during which USB is not serviced. A fixture calling
+            // fast_connect on existing bridges paid that on every reply.
+            if (duplicates >= 0 && connections.bridges[i][2] != duplicates) {
                 connections.bridges[i][2] = duplicates;
+                connections.invalidateCache(config.autoRefreshOnChange);
+                markDirty();
             }
-            connections.invalidateCache(config.autoRefreshOnChange);
-            markDirty();
             return true;
         }
     }
@@ -4906,7 +4913,10 @@ ServiceStatus SlotManager::service() {
             // of writing them into whatever number happened to be tracked.
             // Skip validation on auto-save (state is validated when connections are added/removed)
             static unsigned long lastAutoSaveFailPrint = 0;
-            if (saveActiveSlot(errorMsg, true)) {
+            replt::saveStart();   // debug.repl_timing
+            bool autoSaved = saveActiveSlot(errorMsg, true);
+            replt::saveEnd();
+            if (autoSaved) {
                 lastAutoSaveFailPrint = 0;   // next failure prints immediately
                 unsigned long saveTime = micros() - saveStart;
                 if (debugWaitLoopTiming) {

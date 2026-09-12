@@ -28,6 +28,8 @@ KevinC@ppucc.io
 #include "ArduinoStuff.h"
 #include "CH446Q.h"
 #include "Commands.h"
+#include "ReplTiming.h"   // debug.repl_timing: core 1 render stamps
+#include "RouteSafety.h"   // routingGeneration (the post-route repaint skips the scans)
 #include <EEPROM.h>
 #include <JeoPixel.h>
 #include <SPI.h>
@@ -2042,24 +2044,32 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                         return;
                     }
 
+                    replt::renderStart( );   // debug.repl_timing
                     t[ 6 ] = micros( );
                     showNets( );
-                    if ( debugWaitLoopTimingCore2 ) {
-                        t[ 7 ] = micros( );
-                        if ( ( t[ 7 ] - t[ 6 ] ) > 5000 ) {
-                            // Serial.printf( "CORE2:   showNets() took %lu us\n", t[7] - t[6] );
-                        }
-                    }
+                    t[ 7 ] = micros( );
 
                     // showNets() can take several ms - service the encoder
                     // mid-pass so clickwheel latency doesn't stack up with
                     // the rest of this block (self-throttled, owner core).
                     rotaryEncoderStuff( );
 
+                    // The GPIO / fake-GPIO / measurement scans are background
+                    // work with their own LED feedback; they run every render
+                    // pass. The ONE pass that follows a routing change is the
+                    // repaint a connect is waiting on (its crosspoint send was
+                    // served ahead of it, and the next connect's head wait
+                    // waits for that send), so that pass skips the scans - the
+                    // next pass, a scheduler tick later, runs them as usual.
+                    static uint32_t lastScannedRoutingGen = 0;
+                    const bool postRouteRepaint = ( routingGeneration != lastScannedRoutingGen );
+                    lastScannedRoutingGen = routingGeneration;
                     t[ 8 ] = micros( );
-                    readGPIO( );     // if want, I can make this update the LEDs like 10 times
-                                     // faster by putting outside this loop,
-                    readFakeGPIO( ); // Background reading for fake GPIO inputs with visual updates
+                    if ( !postRouteRepaint ) {
+                        readGPIO( );     // if want, I can make this update the LEDs like 10 times
+                                         // faster by putting outside this loop,
+                        readFakeGPIO( ); // Background reading for fake GPIO inputs with visual updates
+                    }
                     t[ 9 ] = micros( );
 
                     // CRITICAL: Update ADC/GPIO mappings before reading measurements
@@ -2067,7 +2077,9 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                     // Prevents race condition where Core 0/1 updates paths but Core 2 reads stale ADC mappings
                     // chooseShownReadings( );
 
-                    showLEDmeasurements( );
+                    if ( !postRouteRepaint ) {
+                        showLEDmeasurements( );
+                    }
 
                     t[ 10 ] = micros( );
                     showAllRowAnimations( );
@@ -2151,6 +2163,8 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 xbarLatShow( );           // latency probe: first show after a send (XbarLatency.h)
 
                 t[ 13 ] = micros( );
+                // debug.repl_timing: the render this pass did, stage by stage (us)
+                replt::renderEnd( t[ 7 ] - t[ 6 ], t[ 9 ] - t[ 8 ], 0, t[ 10 ] - t[ 9 ], t[ 11 ] - t[ 10 ], t[ 13 ] - t[ 12 ] );
 
                 // Update probe LEDs to reflect current state
 
