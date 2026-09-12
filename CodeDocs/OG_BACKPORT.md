@@ -1629,6 +1629,25 @@ drop to the REPL floor + the crosspoint send (a few ms), with `[replt]`
 showing `save -1..-1` on every line until the 750 ms quiet window.
 Harness: 21/21, crosspoint digest byte-identical to 117bb11.
 
+**`connect_many()` - one rebuild for a batch (same branch).** Fixture,
+k bridges moved per frame (k fast_disconnect + k fast_connect), on-board:
+k=1 3 ms, 4 10, 8 22, 16 56, 24 97 ms - every call re-routes the whole net,
+so a batch is O(k^2). `connect_many(connect=[(a,b),...], disconnect=[...],
+duplicates=-1, *, refresh=True) -> int` (`modjumperless.c`,
+`JumperlessMicroPythonAPI.cpp` jl_nodes_batch_*) applies the disconnects
+then the connects to the netlist (`add/removeBridgeFromState` with
+autoRefresh=false), then ONE `fastRefresh` routes and posts ONE crosspoint
+send, and one LED show or hold - the guarantees of fast_connect on return.
+Returns the number of edits that changed something; no change = no
+rebuild, no send. Both boards; qstr `connect_many` hand-added. Harness
+case 9 (k = 1/4/8/24): the batch's bridge list and closed crosspoints are
+byte-identical to k sequential erase+append rebuilds (the firmware's
+rebuild is a function of `connections.bridges[]` in stored order, and a
+disconnect compacts + a connect appends the same way in both). Expected
+on-board for k=24: one rebuild of a 24-bridge net (the fixture's own last
+sequential step, ~4 ms) plus the send - under the 15 ms target;
+**not measured here.**
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).

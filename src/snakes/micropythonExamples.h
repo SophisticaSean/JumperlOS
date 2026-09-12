@@ -3966,6 +3966,7 @@ connect = _native.connect
 disconnect = _native.disconnect
 fast_connect = _native.fast_connect
 fast_disconnect = _native.fast_disconnect
+connect_many = _native.connect_many
 leds_hold = _native.leds_hold
 leds_flush = _native.leds_flush
 leds_held = _native.leds_held
@@ -4743,7 +4744,7 @@ __all__ = [
     
     # Node Connection Functions
     'node', 'connect', 'disconnect', 'fast_connect', 'fast_disconnect', 'nodes_clear', 'is_connected',
-    'leds_hold', 'leds_flush', 'leds_held',
+    'connect_many', 'leds_hold', 'leds_flush', 'leds_held',
     'nodes_save', 'nodes_discard', 'nodes_has_changes',
     
     # Net Information Functions
@@ -4890,7 +4891,7 @@ __all__ = [
     'gpio_set_read_floating', 'gpio_get_read_floating',
     'set_gpio_read_floating', 'get_gpio_read_floating',
     'gpio_claim_pin', 'gpio_release_pin', 'gpio_release_all_pins',
-    'fast_connect', 'fast_disconnect', 'leds_hold', 'leds_flush', 'leds_held',
+    'fast_connect', 'fast_disconnect', 'connect_many', 'leds_hold', 'leds_flush', 'leds_held',
     'set_net_color_hsv', 'get_all_nets',
     'get_num_paths', 'get_path_info', 'get_all_paths', 'get_path_between',
     'get_node_voltage', 'get_net_current', 'get_path_current',
@@ -5412,6 +5413,29 @@ def fast_disconnect(node1: NodeRef, node2: NodeRef, *, refresh: bool = True) -> 
     
     Args:
         node1, node2: Nodes to disconnect
+    """
+    ...
+
+def connect_many(connect: List[Tuple[NodeRef, NodeRef]] = None,
+                 disconnect: List[Tuple[NodeRef, NodeRef]] = None,
+                 duplicates: int = -1, *, refresh: bool = True) -> int:
+    """Apply many bridge edits, route ONCE, send once
+    
+    Disconnects are applied first, then connects, all to the netlist; then
+    one rebuild routes the whole netlist and posts ONE crosspoint send and
+    one LED show (or a hold with refresh=False). k separate fast_connect
+    calls rebuild k times (each a full route of the net, so O(k^2)); this is
+    one. Same guarantees as fast_connect on return: the crosspoint send is
+    posted to core 1 and completes on its next free pass.
+    
+    Returns the number of edits that changed something. A pair that already
+    is / is not a bridge is skipped; 0 means nothing changed and nothing was
+    sent. A refused connect (part_safety, bad node) is skipped, not raised.
+    
+    Example:
+        # move the 3V3 net from rows 1..24 to rows 31..54 in one frame
+        connect_many(connect=[("3V3", 30 + r) for r in range(1, 25)],
+                     disconnect=[("3V3", r) for r in range(1, 25)])
     """
     ...
 

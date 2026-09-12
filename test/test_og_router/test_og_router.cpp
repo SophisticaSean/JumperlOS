@@ -349,6 +349,38 @@ int main(int argc, char** argv) {
     printf("\n=== 8: one rebuild per call == one rebuild of the batch (crosspoints) ===\n  %zu calls -> %s\n  %s\n", adds.size(), once.c_str(), ok ? "PASS" : "FAIL");
     fails += !ok;
   }
+  // connect_many(): k disconnects + k connects applied to the netlist, then ONE
+  // rebuild, must close the same crosspoints as k rebuilds of the sequential
+  // edits. The firmware's rebuild is a function of connections.bridges[] in
+  // its stored order, so the model is the bridge list itself: sequential =
+  // erase(d_i) then push_back(c_i) with a rebuild per pair; batch = all
+  // erases, all push_backs, one rebuild. (3V3 on rows 1..k moved to 31..30+k,
+  // the fixture's frame.)
+  for (int k : {1, 4, 8, 24}) {
+    std::vector<std::pair<int,int>> seq, batch;
+    for (int r = 1; r <= k; r++) { seq.push_back({SUPPLY_3V3, r}); }
+    batch = seq;
+    auto toDefs = [&](const std::vector<std::pair<int,int>>& br) {
+      NetDef v{6, {SUPPLY_3V3}, {}}; for (auto& b : br) { v.bridges.push_back(b); v.nodes.push_back(b.second); }
+      return std::vector<NetDef>{v};
+    };
+    auto erasePair = [](std::vector<std::pair<int,int>>& br, std::pair<int,int> p) {
+      for (size_t i = 0; i < br.size(); i++) if (br[i] == p) { br.erase(br.begin() + i); return; } };
+    fflush(stdout); int saved = dup(1); FILE* tmp = tmpfile(); dup2(fileno(tmp), 1);
+    std::string seqDigest;
+    for (int r = 1; r <= k; r++) {
+      erasePair(seq, {SUPPLY_3V3, r}); runCase("seq d", toDefs(seq), false);
+      seq.push_back({SUPPLY_3V3, 30 + r}); runCase("seq c", toDefs(seq), false); seqDigest = lastDigest;
+    }
+    for (int r = 1; r <= k; r++) erasePair(batch, {SUPPLY_3V3, r});
+    for (int r = 1; r <= k; r++) batch.push_back({SUPPLY_3V3, 30 + r});
+    runCase("batch", toDefs(batch), false); std::string batchDigest = lastDigest;
+    fflush(stdout); dup2(saved, 1); close(saved); fclose(tmp);
+    bool ok = seqDigest == batchDigest && !batchDigest.empty() && seq == batch;
+    printf("\n=== 9: connect_many k=%d (k disconnect + k connect, one rebuild) == sequential ===\n  %s\n", k, ok ? "PASS" : "FAIL");
+    if (!ok) { printf("  seq:   %s\n  batch: %s\n", seqDigest.c_str(), batchDigest.c_str()); }
+    fails += !ok;
+  }
   // sanity: the thing that works on hardware
   // P: the peripheral nodes the 2026-09-11 bench used (the special-function
   // X pins of chips I/J/K/L per the rev 2 PCB netlist: 5V on J14/L14, I+/I- on

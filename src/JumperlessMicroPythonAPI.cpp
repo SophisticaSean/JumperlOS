@@ -1378,6 +1378,40 @@ int jl_nodes_fast_disconnect( int node1, int node2, int refresh ) {
     return 1;
 }
 
+// connect_many(): the batch primitive. Every edit lands in the netlist
+// first (addBridgeToState / removeBridgeFromState with autoRefresh=false),
+// then ONE fastRefresh routes the whole netlist and posts ONE crosspoint
+// send, and the LEDs get one show (or a hold). k edits that used to cost k
+// full rebuilds (O(k) routing each, so O(k^2) - 97 ms on-board for 24) cost
+// one. Same guarantees as fast_connect on return. Edits that change
+// nothing (pair already a bridge / not a bridge) are counted out; if nothing
+// changed there is no rebuild and no send. Returns the number of edits
+// applied; a refused connect (part_safety, invalid node) is skipped, not
+// fatal - the wrapper reports the count so a script can check it.
+static int s_batchChanged = 0;
+void jl_nodes_batch_begin( void ) { s_batchChanged = 0; }
+int jl_nodes_batch_connect( int node1, int node2, int duplicates ) {
+    if ( connectIsNoop( node1, node2, duplicates ) ) return 0;
+    bool wasBridge = globalState.hasConnection( node1, node2 );
+    if ( !addBridgeToState( node1, node2, duplicates, false ) ) return 0;
+    if ( !wasBridge || duplicates >= 0 ) s_batchChanged++;
+    return 1;
+}
+int jl_nodes_batch_disconnect( int node1, int node2 ) {
+    if ( !removeBridgeFromState( node1, node2, false ) ) return 0;
+    s_batchChanged++;
+    return 1;
+}
+int jl_nodes_batch_commit( int refresh ) {
+    if ( s_batchChanged > 0 ) {
+        fastRefresh( 1 );
+        ledsAfterConnect( refresh );
+    }
+    int n = s_batchChanged;
+    s_batchChanged = 0;
+    return n;
+}
+
 // leds_hold() / leds_flush() / leds_held(): the same hold, driven by hand.
 // flush always posts one nets show (held or not) and returns its generation,
 // so a script can end a batch with a known repaint.

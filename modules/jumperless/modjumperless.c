@@ -101,6 +101,10 @@ int jl_node_is_valid( int node );   // 1 = the node exists on this board (isNode
 int jl_nodes_disconnect( int node1, int node2, int refresh );
 int jl_nodes_fast_connect( int node1, int node2, int duplicates, int refresh );
 int jl_nodes_fast_disconnect( int node1, int node2, int refresh );
+void jl_nodes_batch_begin( void );
+int jl_nodes_batch_connect( int node1, int node2, int duplicates );
+int jl_nodes_batch_disconnect( int node1, int node2 );
+int jl_nodes_batch_commit( int refresh );
 void jl_leds_hold( void );
 int jl_leds_flush( void );
 int jl_leds_held( void );
@@ -2584,6 +2588,45 @@ static mp_obj_t jl_nodes_fast_disconnect_func( size_t n_args, const mp_obj_t* po
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_fast_disconnect_obj, 2, jl_nodes_fast_disconnect_func );
+
+// connect_many(connect=[(a, b), ...], disconnect=[(a, b), ...], duplicates=-1,
+//              refresh=True) -> int
+// Applies every edit to the netlist, then routes ONCE and posts ONE
+// crosspoint send and one LED show (same guarantees as fast_connect on
+// return). Disconnects are applied first, then connects. Returns the number
+// of edits that changed something (0 = nothing changed, nothing sent). A
+// pair is any 2-sequence of node refs (ints, strings, Node constants).
+static void batch_apply_list( mp_obj_t list, bool connect, int duplicates ) {
+    if ( list == mp_const_none || list == MP_OBJ_NULL ) return;
+    size_t n = 0; mp_obj_t* items = NULL;
+    mp_obj_get_array( list, &n, &items );
+    for ( size_t i = 0; i < n; i++ ) {
+        size_t pn = 0; mp_obj_t* pair = NULL;
+        mp_obj_get_array( items[ i ], &pn, &pair );
+        if ( pn != 2 ) {
+            mp_raise_ValueError( MP_ERROR_TEXT( "connect_many: each entry must be a (node1, node2) pair" ) );
+        }
+        int a = get_node_value( pair[ 0 ] );
+        int b = get_node_value( pair[ 1 ] );
+        if ( connect ) jl_nodes_batch_connect( a, b, duplicates );
+        else           jl_nodes_batch_disconnect( a, b );
+    }
+}
+static mp_obj_t jl_connect_many_func( size_t n_args, const mp_obj_t* pos_args, mp_map_t* kw_args ) {
+    static const mp_arg_t allowed_args[] = {
+        { MP_QSTR_connect,    MP_ARG_OBJ,  { .u_obj = mp_const_none } },
+        { MP_QSTR_disconnect, MP_ARG_OBJ,  { .u_obj = mp_const_none } },
+        { MP_QSTR_duplicates, MP_ARG_INT,  { .u_int = -1 } },
+        { MP_QSTR_refresh,    MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = true } },
+    };
+    mp_arg_val_t args[ MP_ARRAY_SIZE( allowed_args ) ];
+    mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
+    jl_nodes_batch_begin( );
+    batch_apply_list( args[ 1 ].u_obj, false, -1 );
+    batch_apply_list( args[ 0 ].u_obj, true, args[ 2 ].u_int );
+    return mp_obj_new_int( jl_nodes_batch_commit( args[ 3 ].u_bool ? 1 : 0 ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW( jl_connect_many_obj, 0, jl_connect_many_func );
 
 // leds_hold(): hold the row-LED repaint (core 1 skips its nets render; the
 // strip keeps its last frame). leds_flush(): drop the hold and post ONE
@@ -6870,6 +6913,7 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_disconnect ), MP_ROM_PTR( &jl_nodes_disconnect_obj ) },
     { MP_ROM_QSTR( MP_QSTR_fast_connect ), MP_ROM_PTR( &jl_nodes_fast_connect_obj ) },
     { MP_ROM_QSTR( MP_QSTR_fast_disconnect ), MP_ROM_PTR( &jl_nodes_fast_disconnect_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_connect_many ), MP_ROM_PTR( &jl_connect_many_obj ) },
     { MP_ROM_QSTR( MP_QSTR_leds_hold ), MP_ROM_PTR( &jl_leds_hold_obj ) },
     { MP_ROM_QSTR( MP_QSTR_leds_flush ), MP_ROM_PTR( &jl_leds_flush_obj ) },
     { MP_ROM_QSTR( MP_QSTR_leds_held ), MP_ROM_PTR( &jl_leds_held_obj ) },
