@@ -1648,6 +1648,39 @@ on-board for k=24: one rebuild of a 24-bridge net (the fixture's own last
 sequential step, ~4 ms) plus the send - under the 15 ms target;
 **not measured here.**
 
+**Readback without the allocation storm (same branch).** Through MCP a
+1-LED frame is 24 ms and a 24-bridge frame 94 ms after the batch fix; the
+remainder was Python readback (~40 C calls at 0.3-0.8 ms each plus the
+dicts: `get_all_nets` + 24x `get_bridge` + 24x `get_path_info` = 51 ms),
+and `get_all_paths()` exhausts the 40 KB heap at 60 paths. Three additions
+(`modjumperless.c`, `JumperlessMicroPythonAPI.cpp`, both boards):
+- **`get_netlist() -> str`** (`get_state()` was taken - it is the JSON
+  state): one string, one allocation, built on the C side into a growing
+  vstr. Lines `<net>|<node>,...` for every net with two or more members,
+  nodes by canonical name (`jl_get_node_name`, what `str(node(x))` prints),
+  then `unrouted|a-b,c-d,...` - every bridge with no clean path. The rule
+  lives in `routing/PathHealth.h` (Arduino-free): no primary path with the
+  bridge's nodes, a refused net (`net < 0`), a skipped path, or a used hop
+  (chip set) whose x or y is -1. **Host-checked against the crossbar model**
+  in every harness case and 4000 random trials: a bridge the rule calls
+  clean is always electrically closed (0 clean-but-open, asserted); on
+  two-node nets the rule's unrouted count equals the model's open-link
+  count (case 10: 30 top-bottom links r<->30+r - the OG crossbar routes 12
+  of 30, 18 open, rule 18).
+- **`connect_many(want=[(a,b),...])`**: replace semantics - the firmware
+  diffs the requested set against its bridge table (pairs
+  order-independent), removes user bridges not in want, adds want pairs
+  not present (infra bridges untouched), then the one rebuild/send/show.
+  connect=/disconnect= still work (want applies first).
+- **`get_path_flat(i)`**: `get_path_info(i)` as a 20-int tuple (small ints
+  are unboxed, one allocation). `get_bridge(i)` already returns a 3-tuple;
+  `get_num_*` are plain ints.
+Expected on-board cost of `get_netlist()` (not measured here): the net
+lines are a name lookup + memcpy per node (~2 us), the unrouted section
+one pass over paths[] per bridge (72 x 72 compares worst case) - well
+under 1 ms for a 24-bridge net and ~1 ms for 60, against the 51 ms the
+three Python loops cost. Harness 30/30, digest unchanged.
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).

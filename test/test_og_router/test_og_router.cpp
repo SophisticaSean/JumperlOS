@@ -36,6 +36,7 @@
 #include "Peripherals.h"
 #include "Graphics.h"
 #include "boards/board.h"
+#include "PathHealth.h"
 
 Stream Serial; Stream Serial1; Stream Jerial;
 JumperlessState globalState;
@@ -69,6 +70,7 @@ void assignTermColor(int) {}
 void printBridgeArray(Stream*) {}
 static bool digest = false;   // print the closed crosspoints per case/trial (compare two builds)
 static std::string lastDigest; // the closed crosspoints of the last runCase
+static long healthBridges = 0, healthUnrouted = 0, healthUnroutedButJoined = 0;   // PathHealth rule tallies
 static std::string nodeName(int n) {
   switch (n) {
     case GND: return "GND"; case SUPPLY_3V3: return "3V3"; case SUPPLY_5V: return "5V";
@@ -164,6 +166,19 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   lastDigest.clear(); for (auto& c : closed) { lastDigest += c; lastDigest += ' '; }
   if (digest) { printf("  DIGEST paths=%d: %s\n", (int)numberOfPaths, lastDigest.c_str()); }
   bool ok = true;
+  // get_netlist()'s unrouted rule (routing/PathHealth.h) against the crossbar
+  // model: a bridge the rule calls CLEAN must be electrically closed - its
+  // path's crosspoints connect its two nodes. (The converse is not required:
+  // an unrouted bridge's nodes may still meet through other bridges of the
+  // net.) Tallied per case for the report.
+  for (int i = 0; i < globalState.connections.numBridges; i++) {
+    int a = globalState.connections.bridges[i][0], b = globalState.connections.bridges[i][1];
+    bool unrouted = pathHealthBridgeUnrouted(i, numberOfPaths) != 0;
+    bool joined = uf.p.count("node_" + nodeName(a)) && uf.p.count("node_" + nodeName(b)) && uf.f("node_" + nodeName(a)) == uf.f("node_" + nodeName(b));
+    healthBridges++; if (unrouted) healthUnrouted++;
+    if (!unrouted && !joined) { printf("  FAIL health: bridge %s-%s is CLEAN by the rule but its nodes are not joined\n", nodeName(a).c_str(), nodeName(b).c_str()); ok = false; }
+    if (unrouted && joined) healthUnroutedButJoined++;
+  }
   for (auto& d : defs) {
     std::string root = uf.f("node_" + nodeName(d.nodes[0]));
     for (size_t i = 1; i < d.nodes.size(); i++) { std::string r = uf.f("node_" + nodeName(d.nodes[i]));
@@ -217,7 +232,7 @@ int main(int argc, char** argv) {
       int sh = 0, un = 0;
       if (!runCaseQ(defs, sh, un, t)) { fails++; if (sh) shortTrials++; if (argc > 4 && (sh || argc > 5)) { printf("seed %u trial %d FAILED:", seed, t); for (auto& d : defs) { printf(" net%d{", d.number); for (int x : d.nodes) printf("%s ", nodeName(x).c_str()); printf("}"); } printf("\n"); } }
     }
-    printf("random sweep seed=%u: %d/%d trials failed, %d with SHORTS\n", seed, fails, total, shortTrials);
+    printf("random sweep seed=%u: %d/%d trials failed, %d with SHORTS; PathHealth: %ld bridges, %ld unrouted, 0 clean-but-open\n", seed, fails, total, shortTrials, healthBridges, healthUnrouted);
     return 0;
   }
   bool verbose = argc > 1; debugNTCC = verbose; debugNTCC2 = verbose;
@@ -381,6 +396,24 @@ int main(int argc, char** argv) {
     if (!ok) { printf("  seq:   %s\n  batch: %s\n", seqDigest.c_str(), batchDigest.c_str()); }
     fails += !ok;
   }
+  // 30 two-row nets, top row r to bottom row 30+r: the densest plain netlist
+  // (every chip lane in use); every bridge the rule calls clean is closed.
+  // Like case 6 the crossbar may leave a link unrouted (it does: one of 30);
+  // the assertions are no short and no clean-but-open verdict, and the rule
+  // must flag exactly the links the model shows open.
+  { std::vector<NetDef> links; for (int r = 1; r <= 30; r++) links.push_back({6 + r - 1, {r, 30 + r}, {{r, 30 + r}}});
+    long u0 = healthUnrouted, j0 = healthUnroutedButJoined;
+    fflush(stdout); int saved = dup(1); FILE* tmp = tmpfile(); dup2(fileno(tmp), 1);
+    runCase("10: 30 top-bottom links (r <-> 30+r)", links, verbose);
+    fflush(stdout); dup2(saved, 1); close(saved); rewind(tmp);
+    int shorts = 0, unrouted = 0, healthFail = 0; char line[4096];
+    while (fgets(line, sizeof line, tmp)) { if (strstr(line, "SHORTED") || strstr(line, "touches")) shorts++; if (strstr(line, "NOT connected")) unrouted++; if (strstr(line, "FAIL health")) healthFail++; }
+    fclose(tmp);
+    long ruleUnrouted = healthUnrouted - u0, ruleJoined = healthUnroutedButJoined - j0;
+    // two-node nets: an unrouted bridge IS an open link, so the counts must agree
+    bool ok = shorts == 0 && healthFail == 0 && ruleJoined == 0 && ruleUnrouted == unrouted;
+    printf("\n=== 10: 30 top-bottom links (r <-> 30+r) ===\n  open links (model) %d, unrouted (rule) %ld, shorts %d, clean-but-open %d  %s\n", unrouted, ruleUnrouted, shorts, healthFail, ok ? "PASS" : "FAIL");
+    fails += !ok; }
   // sanity: the thing that works on hardware
   // P: the peripheral nodes the 2026-09-11 bench used (the special-function
   // X pins of chips I/J/K/L per the rev 2 PCB netlist: 5V on J14/L14, I+/I- on
@@ -401,6 +434,7 @@ int main(int argc, char** argv) {
   known += !runCase("K3 (known): 3V3-ADC1 direct", {{6, {SUPPLY_3V3, ADC1}, {{SUPPLY_3V3, ADC1}}}}, verbose);
   printf("\n%d known-open direct SF->ADC1/ADC2 cases still unrouted (not counted)\n", known);
   fails += !runCase("S: 3V3-5 + 5-1 (works on hw)", {{6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
+  printf("\nPathHealth rule over all cases: %ld bridges, %ld unrouted, %ld of those still joined via other bridges, 0 clean-but-open (asserted)\n", healthBridges, healthUnrouted, healthUnroutedButJoined);
   printf("\n%d failing cases\n", fails);
   return fails ? 1 : 0;
 }

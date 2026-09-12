@@ -3967,6 +3967,8 @@ disconnect = _native.disconnect
 fast_connect = _native.fast_connect
 fast_disconnect = _native.fast_disconnect
 connect_many = _native.connect_many
+get_netlist = _native.get_netlist
+get_path_flat = _native.get_path_flat
 leds_hold = _native.leds_hold
 leds_flush = _native.leds_flush
 leds_held = _native.leds_held
@@ -4744,7 +4746,7 @@ __all__ = [
     
     # Node Connection Functions
     'node', 'connect', 'disconnect', 'fast_connect', 'fast_disconnect', 'nodes_clear', 'is_connected',
-    'connect_many', 'leds_hold', 'leds_flush', 'leds_held',
+    'connect_many', 'get_netlist', 'get_path_flat', 'leds_hold', 'leds_flush', 'leds_held',
     'nodes_save', 'nodes_discard', 'nodes_has_changes',
     
     # Net Information Functions
@@ -4891,7 +4893,7 @@ __all__ = [
     'gpio_set_read_floating', 'gpio_get_read_floating',
     'set_gpio_read_floating', 'get_gpio_read_floating',
     'gpio_claim_pin', 'gpio_release_pin', 'gpio_release_all_pins',
-    'fast_connect', 'fast_disconnect', 'connect_many', 'leds_hold', 'leds_flush', 'leds_held',
+    'fast_connect', 'fast_disconnect', 'connect_many', 'get_netlist', 'get_path_flat', 'leds_hold', 'leds_flush', 'leds_held',
     'set_net_color_hsv', 'get_all_nets',
     'get_num_paths', 'get_path_info', 'get_all_paths', 'get_path_between',
     'get_node_voltage', 'get_net_current', 'get_path_current',
@@ -5418,8 +5420,15 @@ def fast_disconnect(node1: NodeRef, node2: NodeRef, *, refresh: bool = True) -> 
 
 def connect_many(connect: List[Tuple[NodeRef, NodeRef]] = None,
                  disconnect: List[Tuple[NodeRef, NodeRef]] = None,
-                 duplicates: int = -1, *, refresh: bool = True) -> int:
+                 duplicates: int = -1, *, refresh: bool = True,
+                 want: List[Tuple[NodeRef, NodeRef]] = None) -> int:
     """Apply many bridge edits, route ONCE, send once
+    
+    want=[(a, b), ...] is REPLACE semantics: the firmware diffs the requested
+    set against its bridge table (pairs are order-independent) and applies
+    only the difference - user bridges not in want are removed, want pairs
+    not present are added; system (infra) bridges are left alone. Applied
+    before disconnect=/connect=.
     
     Disconnects are applied first, then connects, all to the netlist; then
     one rebuild routes the whole netlist and posts ONE crosspoint send and
@@ -5436,6 +5445,41 @@ def connect_many(connect: List[Tuple[NodeRef, NodeRef]] = None,
         # move the 3V3 net from rows 1..24 to rows 31..54 in one frame
         connect_many(connect=[("3V3", 30 + r) for r in range(1, 25)],
                      disconnect=[("3V3", r) for r in range(1, 25)])
+    """
+    ...
+
+def get_netlist() -> str:
+    """The whole netlist and its routing health, one string, one allocation
+    
+    Lines:
+        <net>|<node>,<node>,...   one per net with two or more members; nodes
+                                  by canonical name (what str(node(x)) prints)
+        unrouted|a-b,c-d,...      every bridge with no clean path: no primary
+                                  path, a refused net, or a used hop whose x
+                                  or y never resolved (crossbar truth). Always
+                                  the last line; empty when everything routed.
+    Bare special nets (one member) are omitted. Built on the C side into one
+    growing buffer - nothing per node lands on the Python heap, unlike
+    get_all_nets() + get_bridge() + get_path_info() loops (~40 calls and
+    their dicts for a 24-bridge net). (get_state() is the JSON state.)
+    
+    Example:
+        for line in get_netlist().split("\n"):
+            key, rest = line.split("|", 1)
+            if key == "unrouted":
+                broken = rest.split(",") if rest else []
+            else:
+                members = rest.split(",")
+    """
+    ...
+
+def get_path_flat(path_idx: int) -> Tuple[int, ...]:
+    """get_path_info(i) without the dict: a tuple of 20 small ints
+    
+    (node1, node2, net, chip0, chip1, chip2, chip3, x0..x5, y0..y5,
+    duplicate) - one tuple allocation, small ints are unboxed. None when
+    out of range. get_bridge(i) already returns (node1, node2, duplicates)
+    the same way; get_num_nets/get_num_bridges/get_num_paths are plain ints.
     """
     ...
 

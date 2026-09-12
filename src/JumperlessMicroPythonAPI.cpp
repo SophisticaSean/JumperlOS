@@ -12,6 +12,7 @@
 #include "ArduinoStuff.h"
 #include "CH446Q.h"
 #include "Commands.h"
+#include "InfraPaths.h"   // infraIsBridge (connect_many want= leaves system bridges alone)
 #include "FileParsing.h"
 #include "FakeGpio.h"
 
@@ -31,6 +32,7 @@
 #include "FilesystemStuff.h" // For safe file operations
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
+#include "PathHealth.h"   // get_netlist() unrouted rule (needs States.h first)
 #include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
 #include "sensing/PartClassify.h"  // part_identify binding
 #include "sensing/PartMeasure.h"   // part_fingerprint binding (Tier-1 clamps)
@@ -1410,6 +1412,60 @@ int jl_nodes_batch_commit( int refresh ) {
     int n = s_batchChanged;
     s_batchChanged = 0;
     return n;
+}
+
+// connect_many(want=[...]): replace semantics. The requested set is diffed
+// against the bridge table (pairs are order-independent): every user bridge
+// not in `want` is removed, every `want` pair not present is added, then the
+// caller commits (one rebuild, one send). Infra (system) bridges are not the
+// user's and are left alone. `wantA/wantB` are the pairs, n <= MAX_BRIDGES.
+int jl_nodes_batch_want( const int16_t* wantA, const int16_t* wantB, int n, int duplicates ) {
+    auto wanted = [&]( int a, int b ) {
+        for ( int i = 0; i < n; i++ )
+            if ( ( wantA[ i ] == a && wantB[ i ] == b ) || ( wantA[ i ] == b && wantB[ i ] == a ) ) return true;
+        return false;
+    };
+    // removals first, from the end so the compaction never skips an entry
+    for ( int i = globalState.connections.numBridges - 1; i >= 0; i-- ) {
+        int a = globalState.connections.bridges[ i ][ 0 ];
+        int b = globalState.connections.bridges[ i ][ 1 ];
+        if ( infraIsBridge( a, b ) ) continue;
+        if ( !wanted( a, b ) ) jl_nodes_batch_disconnect( a, b );
+    }
+    for ( int i = 0; i < n; i++ ) jl_nodes_batch_connect( wantA[ i ], wantB[ i ], duplicates );
+    return s_batchChanged;
+}
+
+int jl_get_max_bridges( void ) { return MAX_BRIDGES; }
+
+// get_state() raw feeds (the string itself is built in the module, where the
+// canonical node names live - jl_get_node_name). No allocation here.
+//   jl_state_net_nodes: the member node ids of net `netNum` (0 when the net
+//   slot is unused), at most `max`.
+int jl_state_net_nodes( int netNum, int* out, int max ) {
+    if ( netNum < 0 || netNum >= MAX_NETS ) return 0;
+    const netStruct& n = globalState.connections.nets[ netNum ];
+    if ( n.number == 0 ) return 0;
+    int k = 0;
+    for ( int j = 0; j < MAX_NODES && k < max && n.nodes[ j ] != 0; j++ ) out[ k++ ] = n.nodes[ j ];
+    return k;
+}
+//   jl_state_bridge_unrouted: the crossbar-truth rule, routing/PathHealth.h
+//   (host-tested against the harness's crossbar model).
+int jl_state_bridge_unrouted( int bridgeIdx ) {
+    return pathHealthBridgeUnrouted( bridgeIdx, globalState.connections.numPaths );
+}
+//   get_path_flat(i): the 20 fields of get_path_info(i) as ints, no dict.
+int jl_state_path_flat( int pathIdx, int* out20 ) {
+    if ( pathIdx < 0 || pathIdx >= globalState.connections.numPaths ) return 0;
+    const pathStruct& p = globalState.connections.paths[ pathIdx ];
+    int k = 0;
+    out20[ k++ ] = p.node1; out20[ k++ ] = p.node2; out20[ k++ ] = p.net;
+    for ( int h = 0; h < 4; h++ ) out20[ k++ ] = p.chip[ h ];
+    for ( int h = 0; h < 6; h++ ) out20[ k++ ] = p.x[ h ];
+    for ( int h = 0; h < 6; h++ ) out20[ k++ ] = p.y[ h ];
+    out20[ k++ ] = p.duplicate;
+    return 1;
 }
 
 // leds_hold() / leds_flush() / leds_held(): the same hold, driven by hand.

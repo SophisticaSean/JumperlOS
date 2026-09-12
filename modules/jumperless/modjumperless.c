@@ -105,6 +105,12 @@ void jl_nodes_batch_begin( void );
 int jl_nodes_batch_connect( int node1, int node2, int duplicates );
 int jl_nodes_batch_disconnect( int node1, int node2 );
 int jl_nodes_batch_commit( int refresh );
+int jl_nodes_batch_want( const int16_t* wantA, const int16_t* wantB, int n, int duplicates );
+int jl_state_net_nodes( int netNum, int* out, int max );
+int jl_state_bridge_unrouted( int bridgeIdx );
+int jl_state_path_flat( int pathIdx, int* out20 );
+int jl_get_num_bridges( void );
+int jl_get_max_bridges( void );
 void jl_leds_hold( void );
 int jl_leds_flush( void );
 int jl_leds_held( void );
@@ -2612,21 +2618,99 @@ static void batch_apply_list( mp_obj_t list, bool connect, int duplicates ) {
         else           jl_nodes_batch_disconnect( a, b );
     }
 }
+// want=[(a, b), ...]: REPLACE semantics - the firmware diffs the requested
+// set against its bridge table (pairs order-independent) and applies only
+// the difference: user bridges not in want are removed, want pairs not
+// present are added (system/infra bridges are left alone). Then the same
+// one rebuild / one send / one show. May be combined with connect=/
+// disconnect= (want is applied first). At most MAX_BRIDGES pairs.
 static mp_obj_t jl_connect_many_func( size_t n_args, const mp_obj_t* pos_args, mp_map_t* kw_args ) {
     static const mp_arg_t allowed_args[] = {
         { MP_QSTR_connect,    MP_ARG_OBJ,  { .u_obj = mp_const_none } },
         { MP_QSTR_disconnect, MP_ARG_OBJ,  { .u_obj = mp_const_none } },
         { MP_QSTR_duplicates, MP_ARG_INT,  { .u_int = -1 } },
         { MP_QSTR_refresh,    MP_ARG_KW_ONLY | MP_ARG_BOOL, { .u_bool = true } },
+        { MP_QSTR_want,       MP_ARG_KW_ONLY | MP_ARG_OBJ,  { .u_obj = mp_const_none } },
     };
     mp_arg_val_t args[ MP_ARRAY_SIZE( allowed_args ) ];
     mp_arg_parse_all( n_args, pos_args, kw_args, MP_ARRAY_SIZE( allowed_args ), allowed_args, args );
     jl_nodes_batch_begin( );
+    if ( args[ 4 ].u_obj != mp_const_none ) {
+        // 128 = the larger board's MAX_BRIDGES; the C side caps at its own
+        int16_t wantA[ 128 ], wantB[ 128 ];
+        size_t n = 0; mp_obj_t* items = NULL;
+        mp_obj_get_array( args[ 4 ].u_obj, &n, &items );
+        if ( n > 128 || (int)n > jl_get_max_bridges( ) ) {
+            mp_raise_ValueError( MP_ERROR_TEXT( "connect_many: want has more pairs than MAX_BRIDGES" ) );
+        }
+        for ( size_t i = 0; i < n; i++ ) {
+            size_t pn = 0; mp_obj_t* pair = NULL;
+            mp_obj_get_array( items[ i ], &pn, &pair );
+            if ( pn != 2 ) {
+                mp_raise_ValueError( MP_ERROR_TEXT( "connect_many: each entry must be a (node1, node2) pair" ) );
+            }
+            wantA[ i ] = (int16_t)get_node_value( pair[ 0 ] );
+            wantB[ i ] = (int16_t)get_node_value( pair[ 1 ] );
+        }
+        jl_nodes_batch_want( wantA, wantB, (int)n, args[ 2 ].u_int );
+    }
     batch_apply_list( args[ 1 ].u_obj, false, -1 );
     batch_apply_list( args[ 0 ].u_obj, true, args[ 2 ].u_int );
     return mp_obj_new_int( jl_nodes_batch_commit( args[ 3 ].u_bool ? 1 : 0 ) );
 }
 static MP_DEFINE_CONST_FUN_OBJ_KW( jl_connect_many_obj, 0, jl_connect_many_func );
+
+// get_netlist() -> str (get_state() is taken: it returns the JSON state):
+// the whole netlist and its routing health in one string, built on the C side, one allocation (the string). Lines:
+//   <net>|<node>,<node>,...      one per net with two or more members, nodes
+//                                by CANONICAL name (what str(node(x)) prints)
+//   unrouted|a-b,c-d,...         every bridge with no clean path (no primary
+//                                path, a refused net, or a used hop whose x or
+//                                y never resolved) - the crossbar-truth rule
+// Single-member (bare special) nets are omitted; "unrouted|" is always the
+// last line, empty when everything routed.
+static void vstr_add_node_name( vstr_t* v, int node ) {
+    const char* name = jl_get_node_name( node );
+    if ( name && name[ 0 ] ) vstr_add_str( v, name );
+    else { char b[ 8 ]; snprintf( b, sizeof b, "%d", node ); vstr_add_str( v, b ); }
+}
+static mp_obj_t jl_get_netlist_func( void ) {
+    vstr_t v;
+    vstr_init( &v, 256 );
+    int nodes[ 64 ];   // MAX_NODES is 64 (OG) / 40 (V5); the C side caps at its own
+    for ( int net = 1; net < 60; net++ ) {   // MAX_NETS
+        int n = jl_state_net_nodes( net, nodes, 64 );
+        if ( n < 2 ) continue;
+        char head[ 8 ]; snprintf( head, sizeof head, "%d|", net ); vstr_add_str( &v, head );
+        for ( int i = 0; i < n; i++ ) { if ( i ) vstr_add_char( &v, ',' ); vstr_add_node_name( &v, nodes[ i ] ); }
+        vstr_add_char( &v, '\n' );
+    }
+    vstr_add_str( &v, "unrouted|" );
+    int nb = jl_get_num_bridges( );
+    bool first = true;
+    for ( int i = 0; i < nb; i++ ) {
+        if ( !jl_state_bridge_unrouted( i ) ) continue;
+        int a, b, d;
+        if ( !jl_get_bridge( i, &a, &b, &d ) ) continue;
+        if ( !first ) vstr_add_char( &v, ',' );
+        first = false;
+        vstr_add_node_name( &v, a ); vstr_add_char( &v, '-' ); vstr_add_node_name( &v, b );
+    }
+    return mp_obj_new_str_from_vstr( &v );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_get_netlist_obj, jl_get_netlist_func );
+
+// get_path_flat(i) -> tuple of 20 ints (node1, node2, net, chip0..3, x0..5,
+// y0..5, duplicate): get_path_info(i) without the dict and the four lists -
+// one tuple allocation, small ints are unboxed. None when i is out of range.
+static mp_obj_t jl_get_path_flat_func( mp_obj_t idx_obj ) {
+    int vals[ 20 ];
+    if ( !jl_state_path_flat( mp_obj_get_int( idx_obj ), vals ) ) return mp_const_none;
+    mp_obj_t items[ 20 ];
+    for ( int i = 0; i < 20; i++ ) items[ i ] = MP_OBJ_NEW_SMALL_INT( vals[ i ] );
+    return mp_obj_new_tuple( 20, items );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_get_path_flat_obj, jl_get_path_flat_func );
 
 // leds_hold(): hold the row-LED repaint (core 1 skips its nets render; the
 // strip keeps its last frame). leds_flush(): drop the hold and post ONE
@@ -6914,6 +6998,8 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_fast_connect ), MP_ROM_PTR( &jl_nodes_fast_connect_obj ) },
     { MP_ROM_QSTR( MP_QSTR_fast_disconnect ), MP_ROM_PTR( &jl_nodes_fast_disconnect_obj ) },
     { MP_ROM_QSTR( MP_QSTR_connect_many ), MP_ROM_PTR( &jl_connect_many_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_get_netlist ), MP_ROM_PTR( &jl_get_netlist_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_get_path_flat ), MP_ROM_PTR( &jl_get_path_flat_obj ) },
     { MP_ROM_QSTR( MP_QSTR_leds_hold ), MP_ROM_PTR( &jl_leds_hold_obj ) },
     { MP_ROM_QSTR( MP_QSTR_leds_flush ), MP_ROM_PTR( &jl_leds_flush_obj ) },
     { MP_ROM_QSTR( MP_QSTR_leds_held ), MP_ROM_PTR( &jl_leds_held_obj ) },
