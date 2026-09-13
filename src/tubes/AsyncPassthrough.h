@@ -23,7 +23,7 @@ namespace AsyncPassthrough {
     // Expose UART received ring for other modules.
     // DMA-filled ring (zero-CPU RX); see AsyncPassthrough.cpp. Size must match
     // the definition there (1 << UART_RX_RING_BITS == 8192).
-    extern uint8_t uartReceived[8192];
+    extern uint8_t uartReceived[];   // sized by UART_RX_RING_BITS in the .cpp
     extern volatile uint16_t uartReceivedHead;
     extern volatile uint16_t uartReceivedTail;
 
@@ -158,6 +158,8 @@ namespace AsyncPassthrough {
      * @param resyncs - number of times receiver was resynced due to framing errors
      */
     void getUARTErrorStats(uint32_t* framing_errors, uint32_t* overruns, uint32_t* resyncs);
+    void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total);
+    void uartSendBlocking(const uint8_t* data, size_t len);
     
     /**
      * Reset UART error counters

@@ -48,8 +48,15 @@
 // ~15.6 KB the 2026-09-08 session ran config saves and slot autosaves on.
 // 48 KB would need 60 KB and cannot fit. The ladder still self-corrects: if
 // a build's boot spends more, it takes 32 KB and says so on port 1.
-#define MICROPY_HEAP_SIZE       (40 * 1024)
-#define MICROPY_HEAP_SIZE_PSRAM (40 * 1024)
+// 2026-09-12 (jumperless-mcp PERF_PLAN.md P3): 56 KB. The RAM image lost
+// 18 984 B of true frees (dead WaveGen DMA ring + its 2 KB alignment, dead
+// slicedLines, libm erf/gamma pulled into .data by the linker, the double erf
+// in Debugs, 1 KB UART RX ring + a 4-entry response queue): __end__ moved
+// 0x20027c74 -> 0x2002324c, the C heap region 99 212 -> 118 196 B, so
+// 56 KB + the 12 KB reserve leaves ~18 KB of C heap, more than the 40 KB
+// build had. Pre-flash gate: ram-report.sh __end__ <= 0x20024000.
+#define MICROPY_HEAP_SIZE       (56 * 1024)
+#define MICROPY_HEAP_SIZE_PSRAM (56 * 1024)
 #else
 #define MICROPY_HEAP_SIZE       (64 * 1024)  // SRAM heap when no PSRAM
 #define MICROPY_HEAP_SIZE_PSRAM  (64 * 1024)  // Smaller SRAM heap when PSRAM provides extra GC space

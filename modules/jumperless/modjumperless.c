@@ -111,6 +111,8 @@ int jl_state_bridge_unrouted( int bridgeIdx );
 int jl_state_path_flat( int pathIdx, int* out20 );
 int jl_get_num_bridges( void );
 int jl_c_heap_free( void );
+void jl_uart_stats( uint32_t* out7 );
+void jl_uart_send( const uint8_t* data, size_t len );
 int jl_get_max_bridges( void );
 void jl_leds_hold( void );
 int jl_leds_flush( void );
@@ -3326,6 +3328,26 @@ static mp_obj_t jl_c_heap_free_func( void ) {
     return mp_obj_new_int( jl_c_heap_free( ) );
 }
 static MP_DEFINE_CONST_FUN_OBJ_0( jl_c_heap_free_obj, jl_c_heap_free_func );
+
+// uart_stats() -> (rx_overflows, rx_laps, tx_overflows, resyncs, framing_errors, overruns, rx_total)
+// The passthrough RX ring's overflow witness (unmasked) for the ring-size feature check.
+static mp_obj_t jl_uart_stats_func( void ) {
+    uint32_t v[ 7 ];
+    jl_uart_stats( v );
+    mp_obj_t items[ 7 ];
+    for ( int i = 0; i < 7; i++ ) items[ i ] = mp_obj_new_int_from_uint( v[ i ] );
+    return mp_obj_new_tuple( 7, items );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_uart_stats_obj, jl_uart_stats_func );
+
+// uart_send(bytes) - blocking write to the passthrough UART hardware (test aid).
+static mp_obj_t jl_uart_send_func( mp_obj_t data ) {
+    mp_buffer_info_t b;
+    mp_get_buffer_raise( data, &b, MP_BUFFER_READ );
+    jl_uart_send( (const uint8_t*)b.buf, b.len );
+    return mp_obj_new_int( (mp_int_t)b.len );
+}
+static MP_DEFINE_CONST_FUN_OBJ_1( jl_uart_send_obj, jl_uart_send_func );
 
 // get_net_nodes(net_num) - Returns nodes in a net as a comma-separated string
 static mp_obj_t jl_get_net_nodes_func( mp_obj_t net_num_obj ) {
@@ -7067,6 +7089,8 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_get_num_nets ), MP_ROM_PTR( &jl_get_num_nets_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_num_bridges ), MP_ROM_PTR( &jl_get_num_bridges_obj ) },
     { MP_ROM_QSTR( MP_QSTR_c_heap_free ), MP_ROM_PTR( &jl_c_heap_free_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_uart_stats ), MP_ROM_PTR( &jl_uart_stats_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_uart_send ), MP_ROM_PTR( &jl_uart_send_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_net_nodes ), MP_ROM_PTR( &jl_get_net_nodes_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_bridge ), MP_ROM_PTR( &jl_get_bridge_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_net_info ), MP_ROM_PTR( &jl_get_net_info_obj ) },

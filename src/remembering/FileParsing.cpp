@@ -1350,8 +1350,6 @@ void clearNodeFile(int slot, int flashOrLocal) {
   // }
 }
 
-String slicedLines[130];
-int slicedLinesIndex = 0;
 
 // Global variables for storing last removed nodes
 int lastRemovedNodes[20] = {-1};

@@ -361,7 +361,11 @@ void *jl_mp_commit_exec(void *buf, size_t len);
 
 // Additional module surface available in this tree (not currently overridden):
 // [avail] MICROPY_PY_CMATH                    (0)  // default mpconfig.h: complex math
-// [avail] MICROPY_PY_MATH_SPECIAL_FUNCTIONS        // already on (FULL >= EXTRA): erf/gamma/...
+// MICROPY_PY_MATH_SPECIAL_FUNCTIONS off: arduino-pico links libm into RAM
+// (.data), and erff/erfcf/lgammaf alone are 4.7 KB of it (jumperless-mcp
+// PERF_PLAN.md P3 row d). Removes math.erf/erfc/gamma/lgamma/expm1/log2/log10
+// and the hyperbolics; exp/log/sin/cos/pow stay. Nothing on the board uses them.
+#define MICROPY_PY_MATH_SPECIAL_FUNCTIONS (0)
 // [avail] MICROPY_PY_RE_SUB                        // already on (FULL >= EXTRA) (doc says URE_SUB)
 // [avail] MICROPY_PY_HASHLIB_SHA256          (1)  // default mpconfig.h (doc says UHASHLIB_SHA256)
 // [avail] MICROPY_PY_HASHLIB_SHA1            (0)  // default mpconfig.h

@@ -841,8 +841,11 @@ static bool mpAllocHeap(void) {
   // ~40 KB of C heap in total, and 12 KB left behind is what its file paths
   // fit in (BoardCaps::mpCHeapReserveKb).
   const size_t MP_HEAP_C_RESERVE = (size_t)board::currentBoard( ).caps.mpCHeapReserveKb * 1024;
-  const size_t rungs[] = {configured, 64 * 1024, 48 * 1024,
+  const size_t rungs[] = {configured, configured - 8 * 1024, 48 * 1024, 40 * 1024,
                           32 * 1024,  24 * 1024, 16 * 1024};
+  // configured-8K and 40 K: a build a few KB short of its configured rung
+  // lands one step down, never two (56 -> 48 -> 40), so a P3-style RAM
+  // regression can only cost 8 KB of GC heap, not 24.
   for (size_t i = 0; i < sizeof(rungs) / sizeof(rungs[0]); i++) {
     size_t sz = rungs[i];
     if (sz > configured) continue;  // never grow past the configured size

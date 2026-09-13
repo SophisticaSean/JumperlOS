@@ -1054,6 +1054,15 @@ int jl_c_heap_free( void ) {
     return (int)rp2040.getFreeHeap( );
 }
 
+// uart_stats(): (rx_overflows, rx_laps, tx_overflows, resyncs, framing_errors, overruns, rx_total)
+void jl_uart_stats( uint32_t* out7 ) {
+    AsyncPassthrough::getUARTRingStats( &out7[ 0 ], &out7[ 1 ], &out7[ 2 ], &out7[ 6 ] );
+    AsyncPassthrough::getUARTErrorStats( &out7[ 4 ], &out7[ 5 ], &out7[ 3 ] );
+}
+void jl_uart_send( const uint8_t* data, size_t len ) {
+    AsyncPassthrough::uartSendBlocking( data, len );
+}
+
 // Get nodes in a net as a comma-separated string (returns static buffer)
 const char* jl_get_net_nodes( int netNum ) {
     static char nodesBuffer[ 256 ];

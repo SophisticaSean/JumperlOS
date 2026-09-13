@@ -2498,8 +2498,19 @@ double statStd( const Stat& s ) {
 
 // Best-case classification accuracy (%) for two equal-prior Gaussians separated
 // by Cohen's d: a single optimal threshold gets Phi(d/2) right.
+// erf() would pull the double-precision erf/erfc/__ieee754_exp into RAM (the
+// arduino-pico linker keeps libm in .data: ~4.4 KB on the OG for a
+// percentage print). Abramowitz & Stegun 7.1.26: |error| < 1.5e-7, and exp()
+// is already linked for other users.
+static double erfApprox( double x ) {
+    double sign = x < 0 ? -1.0 : 1.0;
+    x = x < 0 ? -x : x;
+    double t = 1.0 / ( 1.0 + 0.3275911 * x );
+    double y = 1.0 - ( ( ( ( ( 1.061405429 * t - 1.453152027 ) * t ) + 1.421413741 ) * t - 0.284496736 ) * t + 0.254829592 ) * t * exp( -x * x );
+    return sign * y;
+}
 double sepAccuracyPct( double d ) {
-    return 100.0 * 0.5 * ( 1.0 + erf( d / ( 2.0 * 1.41421356 ) ) );
+    return 100.0 * 0.5 * ( 1.0 + erfApprox( d / ( 2.0 * 1.41421356 ) ) );
 }
 void clearStats( ) { memset( g_stat, 0, sizeof( g_stat ) ); }
 

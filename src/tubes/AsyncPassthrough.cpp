@@ -179,7 +179,11 @@ static uint32_t s_relayed_commands = 0;
 // ============================================================================
 
 // Queue for responses that need to be sent back to UART
+#if defined(OG_JUMPERLESS)
+#define UART_RESPONSE_QUEUE_SIZE 4   // 4 x 256 B; the queue drains every task() pass
+#else
 #define UART_RESPONSE_QUEUE_SIZE 8
+#endif
 #define UART_RESPONSE_MAX_LEN 256
 
 struct UARTResponseEntry {
@@ -366,7 +370,11 @@ static volatile bool s_resync_requested = false;
 // consistent. On the RP2040 (OG) the 8 KB ring is precious static .bss/heap, so
 // use 2 KB there (still ample for the passthrough at typical baud rates).
 #if defined(OG_JUMPERLESS)
-#define UART_RX_RING_BITS 11                 // 2^11 = 2048 bytes
+// 2^10 = 1024 bytes: at 115200 baud (11.5 B/ms) that is 89 ms of consumer
+// slack, and rx_dma_sync_head's witness is unmasked (DMA transfer count), so
+// a lap shows up in uart_stats() instead of vanishing (jumperless-mcp
+// PERF_PLAN.md P3 row c).
+#define UART_RX_RING_BITS 10
 #else
 // 2^12 = 4096 bytes (was 13 / 8 KB). At 115200 baud the UART delivers
 // ~11.5 KB/s and task() drains >=256 B per call, so 4 KB is ~350 ms of
@@ -403,10 +411,10 @@ static void setupRxDma( void );
 static void setupTxDma( void );
 
 // TX staging ring — main thread pushes, TX DMA drains to the UART HW FIFO.
-static uint8_t uartToSend[ 1024 ];
+static uint8_t uartToSend[ 1024 ];   // power of two: UART_TOSEND_MASK derives from it
 static volatile uint16_t uartToSendHead = 0;   // Main thread writes
 static volatile uint16_t uartToSendTail = 0;   // TX DMA reads
-#define UART_TOSEND_MASK 0x03FF
+#define UART_TOSEND_MASK ( (uint16_t)( sizeof( uartToSend ) - 1 ) )
 static volatile uint32_t uartToSendOverflowCount = 0;
 
 static volatile uint32_t s_uart_framing_error_count = 0;
@@ -484,7 +492,8 @@ static uint8_t s_last_usb_to_uart_len = 0;  // number of valid bytes
 // the ring size. An exact whole-lap alias (N*4096 bytes between two syncs
 // landing on the same masked address) reads as its remainder - the witness
 // can undercount extreme laps, but it can no longer miss every one.
-static volatile uint32_t s_rx_dma_last_wa = 0;
+static volatile uint32_t s_rx_dma_last_total = 0;   // bytes the DMA had written at the last sync (unmasked)
+static volatile uint32_t uartReceivedLapCount = 0;  // whole ring laps the consumer missed
 
 // Refresh uartReceivedHead from the live RX-DMA write pointer. The DMA writes
 // the ring with zero CPU; this is how the consumer "sees" newly arrived bytes.
@@ -495,14 +504,19 @@ static inline void rx_dma_sync_head( void ) {
         setupRxDma();
         return;
     }
-    // Overflow witness: if more bytes arrived since the last sync than the
-    // ring had free, the DMA overwrote unconsumed data. Count it (once per
-    // detection, not per byte) so the stats dumps report real laps.
+    // Overflow witness, UNMASKED: the transfer count started at 0xFFFFFFFF
+    // and decrements once per byte, so (0xFFFFFFFF - remaining) is the total
+    // ever written; the delta since the last sync cannot alias to zero on a
+    // whole lap the way a ring-masked address delta did.
     uint32_t wa = dma_hw->ch[ s_rx_dma_chan ].write_addr;
-    uint16_t arrived = (uint16_t)( ( wa - s_rx_dma_last_wa ) & UART_RECEIVED_MASK );
-    s_rx_dma_last_wa = wa;
+    uint32_t total = 0xFFFFFFFFu - dma_hw->ch[ s_rx_dma_chan ].transfer_count;
+    uint32_t arrived = total - s_rx_dma_last_total;
+    s_rx_dma_last_total = total;
     uint16_t freeBytes = (uint16_t)( ( uartReceivedTail - uartReceivedHead - 1 ) & UART_RECEIVED_MASK );
-    if ( arrived > freeBytes ) uartReceivedOverflowCount++;
+    if ( arrived > freeBytes ) {
+        uartReceivedOverflowCount++;
+        uartReceivedLapCount += arrived / sizeof( uartReceived );
+    }
 
     uartReceivedHead =
         (uint16_t)( ( wa - (uint32_t)(uintptr_t)uartReceived ) & UART_RECEIVED_MASK );
@@ -604,8 +618,8 @@ static void setupRxDma( void ) {
     channel_config_set_high_priority( &c, true );
 
     uartReceivedTail = 0;
-    // reset the overflow witness's baseline to where the DMA starts writing
-    s_rx_dma_last_wa = (uint32_t)(uintptr_t)uartReceived;
+    // reset the overflow witness's baseline: nothing written yet
+    s_rx_dma_last_total = 0;
     dma_channel_configure(
         s_rx_dma_chan, &c,
         uartReceived,                                          // write: ring (aligned)
@@ -2621,6 +2635,24 @@ void getUARTErrorStats(uint32_t* framing_errors, uint32_t* overruns, uint32_t* r
     if (framing_errors) *framing_errors = s_uart_framing_error_total;
     if (overruns) *overruns = s_uart_overrun_count;
     if (resyncs) *resyncs = s_uart_resync_count;
+}
+
+// For MicroPython uart_stats(): the RX ring's overflow witness, unmasked.
+void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total) {
+    rx_dma_sync_head();
+    if (overflows) *overflows = uartReceivedOverflowCount;
+    if (laps) *laps = uartReceivedLapCount;
+    if (tx_overflows) *tx_overflows = uartToSendOverflowCount;
+    if (rx_total) *rx_total = s_rx_dma_last_total;
+}
+
+// For MicroPython uart_send(): write straight to the UART hardware, blocking,
+// bypassing the response queue (which only drains in task(), i.e. never
+// inside a MicroPython exec). The feature test for the RX ring size loops
+// UART_TX to UART_RX through the crossbar and bursts while an exec holds
+// the CPU: the RX DMA fills the ring with no consumer, exactly the worst case.
+void uartSendBlocking(const uint8_t* data, size_t len) {
+    uart_write_blocking(ASYNC_PASSTHROUGH_UART, data, len);
 }
 
 void resetUARTErrorStats() {

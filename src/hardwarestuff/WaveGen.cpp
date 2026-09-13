@@ -75,7 +75,14 @@
 // The address ring: B2 reads it with a hardware ring wrap of 4N bytes, so it
 // must sit at an address aligned to its own size; 2 KB alignment covers
 // every N <= 512. Static (BSS) - the heap cannot promise alignment.
+#if defined(OG_JUMPERLESS)
+// The OG never claims the DMA stream (_dmaClaim: fallback reason 5), so the
+// 2 KB address ring and the 2 KB .bss alignment it forced are not paid; the
+// build/start paths below return before touching it.
+static uint32_t s_addrRing[1];
+#else
 static uint32_t __attribute__((aligned(2048))) s_addrRing[512];
+#endif
 
 // Pacing-timer floor: clk_sys / 65535 = 2289 Hz at 150 MHz; plan ticks
 // comfortably above it and let the divider do the rest.
@@ -923,6 +930,9 @@ extern "C" void wavegenBusWindowExit(void) {
 }
 
 void WaveGen::_dmaBuildImage() {
+#if defined(OG_JUMPERLESS)
+    return;   // no DMA stream on the OG (see s_addrRing)
+#endif
     uint32_t N = _plan.N;
     uint8_t cmd = (uint8_t)(0x40 | (((uint8_t)_channel) << 1));   // MULTI_IR write, UDAC = 0: immediate
     for (uint32_t i = 0; i < N; i++) {
