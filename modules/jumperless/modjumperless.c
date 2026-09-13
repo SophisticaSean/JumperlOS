@@ -111,7 +111,7 @@ int jl_state_bridge_unrouted( int bridgeIdx );
 int jl_state_path_flat( int pathIdx, int* out20 );
 int jl_get_num_bridges( void );
 int jl_c_heap_free( void );
-void jl_uart_stats( uint32_t* out7 );
+void jl_uart_stats( uint32_t* out8 );
 void jl_uart_send( const uint8_t* data, size_t len );
 int jl_get_max_bridges( void );
 void jl_leds_hold( void );
@@ -3329,14 +3329,16 @@ static mp_obj_t jl_c_heap_free_func( void ) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0( jl_c_heap_free_obj, jl_c_heap_free_func );
 
-// uart_stats() -> (rx_overflows, rx_laps, tx_overflows, resyncs, framing_errors, overruns, rx_total)
-// The passthrough RX ring's overflow witness (unmasked) for the ring-size feature check.
+// uart_stats() -> (rx_overflows, rx_laps, tx_overflows, resyncs, framing_errors, overruns, rx_total, state)
+// The passthrough RX ring's overflow witness (unmasked) for the ring-size feature
+// check; state: -1 passthrough never began, -2 RX DMA not armed, else its channel.
 static mp_obj_t jl_uart_stats_func( void ) {
-    uint32_t v[ 7 ];
+    uint32_t v[ 8 ];
     jl_uart_stats( v );
-    mp_obj_t items[ 7 ];
+    mp_obj_t items[ 8 ];
     for ( int i = 0; i < 7; i++ ) items[ i ] = mp_obj_new_int_from_uint( v[ i ] );
-    return mp_obj_new_tuple( 7, items );
+    items[ 7 ] = mp_obj_new_int( (int32_t)v[ 7 ] );
+    return mp_obj_new_tuple( 8, items );
 }
 static MP_DEFINE_CONST_FUN_OBJ_0( jl_uart_stats_obj, jl_uart_stats_func );
 

@@ -370,11 +370,11 @@ static volatile bool s_resync_requested = false;
 // consistent. On the RP2040 (OG) the 8 KB ring is precious static .bss/heap, so
 // use 2 KB there (still ample for the passthrough at typical baud rates).
 #if defined(OG_JUMPERLESS)
-// 2^10 = 1024 bytes: at 115200 baud (11.5 B/ms) that is 89 ms of consumer
-// slack, and rx_dma_sync_head's witness is unmasked (DMA transfer count), so
-// a lap shows up in uart_stats() instead of vanishing (jumperless-mcp
-// PERF_PLAN.md P3 row c).
-#define UART_RX_RING_BITS 10
+// 2^11 = 2048 bytes (178 ms of consumer slack at 115200). A 1 KB ring was
+// planned (jumperless-mcp PERF_PLAN.md P3 row c) but the rev 2 board's
+// RP_UART_TX/RX crossbar nodes read floating, so the loopback feature test
+// could not prove it; the witness in rx_dma_sync_head is unmasked either way.
+#define UART_RX_RING_BITS 11
 #else
 // 2^12 = 4096 bytes (was 13 / 8 KB). At 115200 baud the UART delivers
 // ~11.5 KB/s and task() drains >=256 B per call, so 4 KB is ~350 ms of
@@ -2638,12 +2638,14 @@ void getUARTErrorStats(uint32_t* framing_errors, uint32_t* overruns, uint32_t* r
 }
 
 // For MicroPython uart_stats(): the RX ring's overflow witness, unmasked.
-void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total) {
+void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total, int32_t* state) {
     rx_dma_sync_head();
     if (overflows) *overflows = uartReceivedOverflowCount;
     if (laps) *laps = uartReceivedLapCount;
     if (tx_overflows) *tx_overflows = uartToSendOverflowCount;
     if (rx_total) *rx_total = s_rx_dma_last_total;
+    // state: -1 = begin() never ran, -2 = begun but RX DMA not armed, else the DMA channel
+    if (state) *state = !async_begun ? -1 : ( s_rx_dma_chan < 0 ? -2 : s_rx_dma_chan );
 }
 
 // For MicroPython uart_send(): write straight to the UART hardware, blocking,

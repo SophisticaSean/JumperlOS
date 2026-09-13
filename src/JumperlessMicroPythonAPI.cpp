@@ -1054,10 +1054,12 @@ int jl_c_heap_free( void ) {
     return (int)rp2040.getFreeHeap( );
 }
 
-// uart_stats(): (rx_overflows, rx_laps, tx_overflows, resyncs, framing_errors, overruns, rx_total)
-void jl_uart_stats( uint32_t* out7 ) {
-    AsyncPassthrough::getUARTRingStats( &out7[ 0 ], &out7[ 1 ], &out7[ 2 ], &out7[ 6 ] );
-    AsyncPassthrough::getUARTErrorStats( &out7[ 4 ], &out7[ 5 ], &out7[ 3 ] );
+// uart_stats(): (rx_overflows, rx_laps, tx_overflows, resyncs, framing_errors, overruns, rx_total, state)
+void jl_uart_stats( uint32_t* out8 ) {
+    int32_t state = 0;
+    AsyncPassthrough::getUARTRingStats( &out8[ 0 ], &out8[ 1 ], &out8[ 2 ], &out8[ 6 ], &state );
+    AsyncPassthrough::getUARTErrorStats( &out8[ 4 ], &out8[ 5 ], &out8[ 3 ] );
+    out8[ 7 ] = (uint32_t)state;
 }
 void jl_uart_send( const uint8_t* data, size_t len ) {
     AsyncPassthrough::uartSendBlocking( data, len );

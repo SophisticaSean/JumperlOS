@@ -158,7 +158,7 @@ namespace AsyncPassthrough {
      * @param resyncs - number of times receiver was resynced due to framing errors
      */
     void getUARTErrorStats(uint32_t* framing_errors, uint32_t* overruns, uint32_t* resyncs);
-    void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total);
+    void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total, int32_t* state);
     void uartSendBlocking(const uint8_t* data, size_t len);
     
     /**
