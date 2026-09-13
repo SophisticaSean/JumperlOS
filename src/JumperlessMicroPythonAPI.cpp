@@ -1050,6 +1050,10 @@ int jl_get_num_bridges( void ) {
     return globalState.connections.numBridges;
 }
 
+int jl_c_heap_free( void ) {
+    return (int)rp2040.getFreeHeap( );
+}
+
 // Get nodes in a net as a comma-separated string (returns static buffer)
 const char* jl_get_net_nodes( int netNum ) {
     static char nodesBuffer[ 256 ];

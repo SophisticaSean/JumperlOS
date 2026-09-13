@@ -110,6 +110,7 @@ int jl_state_net_nodes( int netNum, int* out, int max );
 int jl_state_bridge_unrouted( int bridgeIdx );
 int jl_state_path_flat( int pathIdx, int* out20 );
 int jl_get_num_bridges( void );
+int jl_c_heap_free( void );
 int jl_get_max_bridges( void );
 void jl_leds_hold( void );
 int jl_leds_flush( void );
@@ -2602,8 +2603,33 @@ static MP_DEFINE_CONST_FUN_OBJ_KW( jl_nodes_fast_disconnect_obj, 2, jl_nodes_fas
 // return). Disconnects are applied first, then connects. Returns the number
 // of edits that changed something (0 = nothing changed, nothing sent). A
 // pair is any 2-sequence of node refs (ints, strings, Node constants).
+#include "pair_str.h"
+// Parse a str pair list into the caller's arrays; raises ValueError with
+// nothing edited on any defect. Returns the pair count.
+static int pair_str_parse( mp_obj_t str, int16_t* A, int16_t* B, int max ) {
+    size_t len = 0;
+    const char* s = mp_obj_str_get_data( str, &len );
+    int n = pair_str_count( s, len );
+    if ( n < 0 ) {
+        mp_raise_ValueError( MP_ERROR_TEXT( "connect_many: bad pair string (want \"<id>:<p>,<p>;...\", ids 1..199)" ) );
+    }
+    if ( n > max || n > jl_get_max_bridges( ) ) {
+        mp_raise_ValueError( MP_ERROR_TEXT( "connect_many: more pairs than MAX_BRIDGES" ) );
+    }
+    pair_str_fill( s, len, A, B );
+    return n;
+}
 static void batch_apply_list( mp_obj_t list, bool connect, int duplicates ) {
     if ( list == mp_const_none || list == MP_OBJ_NULL ) return;
+    if ( mp_obj_is_str( list ) ) {
+        int16_t A[ 128 ], B[ 128 ];
+        int n = pair_str_parse( list, A, B, 128 );
+        for ( int i = 0; i < n; i++ ) {
+            if ( connect ) jl_nodes_batch_connect( A[ i ], B[ i ], duplicates );
+            else           jl_nodes_batch_disconnect( A[ i ], B[ i ] );
+        }
+        return;
+    }
     size_t n = 0; mp_obj_t* items = NULL;
     mp_obj_get_array( list, &n, &items );
     for ( size_t i = 0; i < n; i++ ) {
@@ -2639,6 +2665,13 @@ static mp_obj_t jl_connect_many_func( size_t n_args, const mp_obj_t* pos_args, m
         // 128 = the larger board's MAX_BRIDGES; the C side caps at its own
         int16_t wantA[ 128 ], wantB[ 128 ];
         size_t n = 0; mp_obj_t* items = NULL;
+        if ( mp_obj_is_str( args[ 4 ].u_obj ) ) {
+            n = (size_t)pair_str_parse( args[ 4 ].u_obj, wantA, wantB, 128 );
+            jl_nodes_batch_want( wantA, wantB, (int)n, args[ 2 ].u_int );
+            batch_apply_list( args[ 1 ].u_obj, false, -1 );
+            batch_apply_list( args[ 0 ].u_obj, true, args[ 2 ].u_int );
+            return mp_obj_new_int( jl_nodes_batch_commit( args[ 3 ].u_bool ? 1 : 0 ) );
+        }
         mp_obj_get_array( args[ 4 ].u_obj, &n, &items );
         if ( n > 128 || (int)n > jl_get_max_bridges( ) ) {
             mp_raise_ValueError( MP_ERROR_TEXT( "connect_many: want has more pairs than MAX_BRIDGES" ) );
@@ -3286,6 +3319,13 @@ static mp_obj_t jl_get_num_bridges_func( void ) {
     return mp_obj_new_int( jl_get_num_bridges( ) );
 }
 static MP_DEFINE_CONST_FUN_OBJ_0( jl_get_num_bridges_obj, jl_get_num_bridges_func );
+
+// c_heap_free() - bytes left in the C heap (the MicroPython heap is malloc'd
+// from it at boot; PERF_PLAN.md G3 needs the remainder, not gc.mem_free()).
+static mp_obj_t jl_c_heap_free_func( void ) {
+    return mp_obj_new_int( jl_c_heap_free( ) );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_c_heap_free_obj, jl_c_heap_free_func );
 
 // get_net_nodes(net_num) - Returns nodes in a net as a comma-separated string
 static mp_obj_t jl_get_net_nodes_func( mp_obj_t net_num_obj ) {
@@ -7026,6 +7066,7 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_set_net_color_hsv ), MP_ROM_PTR( &jl_set_net_color_hsv_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_num_nets ), MP_ROM_PTR( &jl_get_num_nets_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_num_bridges ), MP_ROM_PTR( &jl_get_num_bridges_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_c_heap_free ), MP_ROM_PTR( &jl_c_heap_free_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_net_nodes ), MP_ROM_PTR( &jl_get_net_nodes_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_bridge ), MP_ROM_PTR( &jl_get_bridge_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_net_info ), MP_ROM_PTR( &jl_get_net_info_obj ) },
