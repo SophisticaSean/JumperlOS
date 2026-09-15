@@ -3696,9 +3696,9 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 break;
               }
             }
-                    if (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1)
+                    if ((xMapL1c0 != -1) && (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1))
                     {
-                        if (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1) // lanes 1 1
+                        if ((xMapL1c1 != -1) && (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1)) // lanes 1 1
                         {
                             ch[bb].xStatus[xMapL1c0] = path[i].net;
                             ch[bb].xStatus[xMapL1c1] = path[i].net;
@@ -3763,7 +3763,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
             }
                     if (ch[bb].xStatus[xMapL0c0] == path[i].net || ch[bb].xStatus[xMapL0c0] == -1)
                     {
-                        if (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1) // lanes 0 1
+                        if ((xMapL1c1 != -1) && (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1)) // lanes 0 1
                         {
 
                             if (giveUpOnL == 0)
@@ -3825,7 +3825,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 break;
               }
             }
-                    if (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1)
+                    if ((xMapL1c0 != -1) && (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1))
                     {
                         if (ch[bb].xStatus[xMapL0c1] == path[i].net || ch[bb].xStatus[xMapL0c1] == -1) // lanes 1 0
                         {
@@ -4382,10 +4382,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             continue;
                         }
 
-                        if (ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1)
+                        if ((chip1Lane != -1) && (ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1))
                         {
 
-                            if (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1)
+                            if ((chip2Lane != -1) && (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1))
                             {
                                 // Serial.println("VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV");
                                 // Serial.print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
@@ -4486,9 +4486,9 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
             // Serial.print("path: ");
             // Serial.println(i);
               // Serial.print("?????????????????????\n\r");
-                        if ((ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1) && foundHop == 0)
+                        if ((chip1Lane != -1) && (ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1) && foundHop == 0)
                         {
-                            if (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1)
+                            if ((chip2Lane != -1) && (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1))
                             {
                   // Serial.print("path :");
                   // Serial.println(i);
