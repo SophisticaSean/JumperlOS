@@ -227,21 +227,37 @@ static bool runCaseQ(std::vector<NetDef> defs, int& shorts, int& unrouted, int t
 int main(int argc, char** argv) {
   if (getenv("OG_ROUTER_DIGEST")) digest = true;
   if (argc > 2 && std::string(argv[1]) == "rand") {
-    unsigned seed = atoi(argv[2]); int n = argc > 3 ? atoi(argv[3]) : 200; srand(seed);
+    unsigned seed = atoi(argv[2]); int n = argc > 3 ? atoi(argv[3]) : 200;
+    // In-file xorshift32 so "seed 1" is the same sequence on glibc, macOS and
+    // musl (rand() is not) - the per-seed ratchet in host_tests.sh depends on it.
+    uint32_t rng = seed ? seed : 0x9E3779B9u;
+    auto rnd = [&](int m) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return (int)(rng % (uint32_t)m); };
     debugNTCC = false; debugNTCC2 = false;
     int fails = 0; int total = 0; int shortTrials = 0;
-    const int sfPool[] = {GND, SUPPLY_3V3, SUPPLY_5V, DAC0, DAC1, ADC0, ADC1, ADC2, ADC3, RP_GPIO_0, RP_UART_TX, RP_UART_RX};
+    // Every special-function node the OG topology routes (no RP_GPIO_1..8 on
+    // the rev 2), the nano header, and the rails. Up to two SF nodes per net.
+    std::vector<int> sfPool = {GND, SUPPLY_3V3, SUPPLY_5V, DAC0, DAC1, ADC0, ADC1, ADC2, ADC3, RP_GPIO_0, RP_UART_TX, RP_UART_RX,
+                               ISENSE_PLUS, ISENSE_MINUS, TOP_RAIL, BOTTOM_RAIL, NANO_RESET, NANO_AREF};
+    // The nano header is in the pool only with OG_SWEEP_NANO=1: with it the
+    // router SHORTS ~5 trials per 10 000 (a NANO-to-SF same-chip bounce
+    // re-claims a Y lane an alt path already took - fixed case K4 below
+    // pins one). The default sweep keeps shorts == 0 as a hard gate; the
+    // nano sweep is reported, not gated, until that router bug is fixed.
+    if (getenv("OG_SWEEP_NANO")) {
+      for (int k = 0; k < 14; k++) sfPool.push_back(NANO_D0 + k);
+      for (int k = 0; k < 8; k++) sfPool.push_back(NANO_A0 + k);
+    }
     for (int t = 0; t < n; t++) {
       std::vector<NetDef> defs; std::set<int> used; int netNo = 6; int gndUsed = 0;
-      int nets = 1 + rand() % 4;
+      int nets = 1 + rnd(4);
       for (int k = 0; k < nets; k++) {
-        NetDef d; int sf = -1; if (rand() % 3) { sf = sfPool[rand() % 12]; if (used.count(sf)) sf = -1; }
-        if (sf == GND && gndUsed) sf = -1;
-        if (sf != -1) { used.insert(sf); d.nodes.push_back(sf); }
-        int rows = 1 + rand() % 6; if (sf == -1 && rows < 2) rows = 2;
-        for (int r = 0; r < rows; r++) { int row; int tries = 0; do { row = 1 + rand() % 60; } while (used.count(row) && ++tries < 100); if (used.count(row)) continue; used.insert(row); d.nodes.push_back(row); }
+        NetDef d; int sf = -1;
+        int nsf = rnd(3) ? 1 + (rnd(4) == 0) : 0;   // 0, 1 or (rarely) 2 SF nodes
+        for (int q = 0; q < nsf; q++) { int c = sfPool[rnd((int)sfPool.size())]; if (used.count(c)) continue; if (c == GND && gndUsed) continue; used.insert(c); d.nodes.push_back(c); if (sf == -1) sf = c; }
+        int rows = 1 + rnd(6); if (d.nodes.empty() && rows < 2) rows = 2;
+        for (int r = 0; r < rows; r++) { int row; int tries = 0; do { row = 1 + rnd(60); } while (used.count(row) && ++tries < 100); if (used.count(row)) continue; used.insert(row); d.nodes.push_back(row); }
         if ((int)d.nodes.size() < 2) continue;
-        for (size_t i = 1; i < d.nodes.size(); i++) d.bridges.push_back({d.nodes[rand() % i], d.nodes[i]});
+        for (size_t i = 1; i < d.nodes.size(); i++) d.bridges.push_back({d.nodes[rnd((int)i)], d.nodes[i]});
         if (sf == GND) { d.number = 1; gndUsed = 1; } else d.number = netNo++;
         defs.push_back(d);
       }
@@ -266,6 +282,23 @@ int main(int argc, char** argv) {
   fails += !runCase("2r: {GND,28,30} + {3V3,5,1} (reordered)", {{1, {GND, 28, 30}, {{GND, 28}, {28, 30}}}, {6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
   fails += !runCase("2b: 3V3-1 + GND-30 (direct corners)", {{6, {SUPPLY_3V3, 1}, {{SUPPLY_3V3, 1}}}, {1, {GND, 30}, {{GND, 30}}}}, verbose);
   fails += !runCase("2c: all four corners", {{6, {SUPPLY_3V3, 1}, {{SUPPLY_3V3, 1}}}, {1, {GND, 30}, {{GND, 30}}}, {7, {ADC0, 31}, {{ADC0, 31}}}, {8, {DAC0, 60}, {{DAC0, 60}}}}, verbose);
+  // Y0M: the Y0 / L-Y mirror guard. On the OG a breadboard chip's Y0 and
+  // chip L's Y[that chip] are the SAME wire; two nets bouncing on "their" end
+  // of it short. This netlist (net order matters - bridgesToPaths is
+  // order-dependent) routes path 1 as an L-chip bounce 56(H)->1(L) via chip A
+  // Y0, written single-sided, which is exactly the asymmetry the guard in
+  // freeOrSameNetY catches. gcov.sh proves the guard's reject arm is taken
+  // here, and gcov.sh --revert proves the case SHORTS with both mirror
+  // blocks removed (the setChipYStatusSafe copy alone turns the short into
+  // an unrouted path, so the revert must take both).
+  fails += !runCase("Y0M: {DAC1,1,56,39,22,31} + {ADC0,60,2} + {3V3,4,58} + {25,50,29,23,16,52} (mirror guard)",
+                    {{6, {DAC1, 1, 56, 39, 22, 31}, {{DAC1, 1}, {56, 1}, {56, 39}, {56, 22}, {31, DAC1}}},
+                     {7, {ADC0, 60, 2}, {{60, ADC0}, {2, ADC0}}},
+                     {8, {SUPPLY_3V3, 4, 58}, {{4, SUPPLY_3V3}, {4, 58}}},
+                     {9, {25, 50, 29, 23, 16, 52}, {{25, 50}, {25, 29}, {50, 23}, {23, 16}, {50, 52}}}}, verbose);
+  // swapDuplicateNode's L-chip arm: 5V and ADC1 in SEPARATE nets used to
+  // short through J Y0 ("ADC1 shorted to 5V").
+  fails += !runCase("Lsw: {5V,8} + {ADC1,12} (separate nets, L-chip swap)", {{6, {SUPPLY_5V, 8}, {{SUPPLY_5V, 8}}}, {7, {ADC1, 12}, {{ADC1, 12}}}}, verbose);
   // Case 3 (bug 3): a big GND net next to 3V3 on the same chip.
   { NetDef g{1, {GND}, {}}; for (int r = 4; r <= 11; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
     fails += !runCase("3: 3V3-3 + GND-4..11", {{6, {SUPPLY_3V3, 3}, {{SUPPLY_3V3, 3}}}, g}, verbose); }
@@ -513,11 +546,36 @@ int main(int argc, char** argv) {
   // or ADC2 with no row in the net is left unrouted - the I->A->K three-chip
   // path keeps a -2 Y position (see the v trace). Through a row it routes
   // (P5). Counted separately so the harness stays green while it is open.
-  int known = 0;
-  known += !runCase("K1 (known): 3V3-ADC2 direct", {{6, {SUPPLY_3V3, ADC2}, {{SUPPLY_3V3, ADC2}}}}, verbose);
-  known += !runCase("K2 (known): GND-ADC2 direct", {{1, {GND, ADC2}, {{GND, ADC2}}}}, verbose);
-  known += !runCase("K3 (known): 3V3-ADC1 direct", {{6, {SUPPLY_3V3, ADC1}, {{SUPPLY_3V3, ADC1}}}}, verbose);
-  printf("\n%d known-open direct SF->ADC1/ADC2 cases still unrouted (not counted)\n", known);
+  // Asserted as EXPECTED-UNROUTED (open, never shorted) so a router fix
+  // flips a named case instead of passing silently; OG leg only (on the V5
+  // these are ordinary cases and the PR body records what they do).
+#if defined(OG_JUMPERLESS)
+  auto expectUnrouted = [&](const char* title, std::vector<NetDef> defs) {
+    int sh = 0, un = 0; runCaseQ(defs, sh, un);
+    bool ok = un > 0 && sh == 0;
+    printf("\n=== %s ===\n  unrouted=%d shorts=%d  %s (expected unrouted, not shorted)\n", title, un, sh, ok ? "PASS" : (un == 0 ? "FIXED? now routes - promote to a plain case" : "FAIL"));
+    return ok;
+  };
+  fails += !expectUnrouted("K1 (known-open): 3V3-ADC2 direct", {{6, {SUPPLY_3V3, ADC2}, {{SUPPLY_3V3, ADC2}}}});
+  fails += !expectUnrouted("K2 (known-open): GND-ADC2 direct", {{1, {GND, ADC2}, {{GND, ADC2}}}});
+  fails += !expectUnrouted("K3 (known-open): 3V3-ADC1 direct", {{6, {SUPPLY_3V3, ADC1}, {{SUPPLY_3V3, ADC1}}}});
+  // K4 (found by the widened sweep, 2026-09-15): a nano node bridged to an
+  // SF node on the SAME chip (ADC1 and D0 both live on chip J) bounces
+  // through J Y0, but that Y is only claimed late, so another net's alt path
+  // (D4 -> row 11 via J Y0 -> chip A) passes freeOrSameNetY first and the two
+  // end up on one lane: net 6 SHORTED to net 7. Asserted as the CURRENT
+  // (wrong) behaviour so the fix flips a named case; router untouched here.
+  {
+    int sh = 0, un = 0; runCaseQ({{6, {ADC1, NANO_D0, 9}, {{ADC1, NANO_D0}, {9, NANO_D0}}}, {7, {NANO_D4, 49, 11, 57, 4}, {{49, NANO_D4}, {11, NANO_D4}, {11, 57}, {4, 49}}}}, sh, un);
+    bool ok = sh > 0;
+    printf("\n=== K4 (KNOWN-OPEN SHORT): {ADC1,D0,9} + {D4,49,11,57,4} (same-chip nano bounce vs alt path) ===\n  shorts=%d unrouted=%d  %s\n", sh, un, ok ? "PASS (still shorts - router bug open, see OG_SWEEP_NANO)" : "FIXED? no longer shorts - promote to a plain case and gate the nano sweep");
+    fails += !ok;
+  }
+#else
+  fails += !runCase("K1: 3V3-ADC2 direct", {{6, {SUPPLY_3V3, ADC2}, {{SUPPLY_3V3, ADC2}}}}, verbose);
+  fails += !runCase("K2: GND-ADC2 direct", {{1, {GND, ADC2}, {{GND, ADC2}}}}, verbose);
+  fails += !runCase("K3: 3V3-ADC1 direct", {{6, {SUPPLY_3V3, ADC1}, {{SUPPLY_3V3, ADC1}}}}, verbose);
+#endif
   fails += !runCase("S: 3V3-5 + 5-1 (works on hw)", {{6, {SUPPLY_3V3, 5, 1}, {{SUPPLY_3V3, 5}, {5, 1}}}}, verbose);
   printf("\nPathHealth rule over all cases: %ld bridges, %ld unrouted, %ld of those still joined via other bridges; rule == own-path truth both ways (asserted)\n", healthBridges, healthUnrouted, healthUnroutedButJoined);
   printf("\n%d failing cases\n", fails);

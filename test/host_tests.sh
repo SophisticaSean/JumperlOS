@@ -1,17 +1,64 @@
 #!/usr/bin/env bash
-# Every host test in one command (no hardware, no PlatformIO): the four
-# harnesses, then the OG router random sweep as a regression floor - shorts
-# must stay at 0 and the unrouted-trial count must not grow past what
-# og-routing-perf measured (seed 1, 2000 trials: 136; lane exhaustion, not bugs).
+# Every host test in one command (no hardware, no PlatformIO).
+#
+#   test/host_tests.sh          gcc/clang -Os legs: the harnesses + the OG
+#                               router sweeps (exact per-seed ratchet)
+#   test/host_tests.sh ubsan    the same router harness under clang's
+#                               undefined/bounds/implicit-conversion/integer
+#                               sanitizers with recovery OFF - any report
+#                               is a failure. Run it after touching the router.
+#
+# The sweep gate is a RATCHET, not a floor: shorts must be 0, and the
+# per-bridge unrouted count of each seed must EQUAL the recorded value - any
+# routing change, better or worse, updates the numbers in the same commit,
+# which also makes "this change does not alter routing" mechanical. The
+# generator is an in-file xorshift32, so the numbers hold on glibc, macOS
+# and musl. Unrouted bridges are lane exhaustion on the rev 2 crossbar, not
+# bugs; the numbers below were recorded on og-routing-perf 2026-09-15 with
+# the widened generator (SF nodes, ISENSE, rails, NANO_RESET/AREF; the nano
+# header is OG_SWEEP_NANO=1 only - see K4 in the harness).
+#
+# Measured against: local g++ 11 / clang 14 / gawk 5.1; CI ubuntu-latest
+# (newer clang, wider implicit-conversion group) and macos-latest (BSD awk,
+# libc). Recover-mode enumeration of sanitizer sites, when the hard leg
+# turns red on new code:
+#   CXX=clang++ CXXFLAGS="-O1 -g -fsanitize=undefined,bounds,implicit-conversion,integer \
+#     -fno-sanitize=enum,unsigned-shift-base -fsanitize-recover=all -w" \
+#     BUILD_DIR=$TMPDIR/og_ubsan test/test_og_router/run.sh
+#   $TMPDIR/og_ubsan/og/test_og_router rand 2 10000 2>&1 | grep 'runtime error' | sort -u
 set -euo pipefail
 cd "$(dirname "$0")/.."
+TMP=${RUNNER_TEMP:-/tmp}
+declare -A WANT=( [1]=7429 [2]=7347 [7]=7671 )   # per-bridge unrouted, seeds x 10 000 trials
+
+sweep() {   # $1 = binary
+  local bin=$1 seed line shorts unrouted
+  for seed in 1 2 7; do
+    line=$("$bin" rand "$seed" 10000 | tail -1); echo "$line"
+    shorts=$(sed -E 's/.*, ([0-9]+) with SHORTS.*/\1/' <<<"$line")
+    unrouted=$(sed -E 's/.*PathHealth: [0-9]+ bridges, ([0-9]+) unrouted.*/\1/' <<<"$line")
+    [ "$shorts" -eq 0 ] || { echo "FAIL: seed $seed: $shorts trials shorted"; exit 1; }
+    [ "$unrouted" -eq "${WANT[$seed]}" ] || { echo "FAIL: seed $seed: $unrouted unrouted bridges, recorded ${WANT[$seed]} - routing changed; inspect the digest, then update WANT in the same commit"; exit 1; }
+  done
+}
+
+if [ "${1:-}" = ubsan ]; then
+  echo "== test_og_router (ubsan, no recovery)"
+  out=$(CXX=${CXX:-clang++} CXXFLAGS="-O1 -g -fsanitize=undefined,bounds,implicit-conversion,integer -fno-sanitize=enum,unsigned-shift-base -fno-sanitize-recover=all -w" \
+        BUILD_DIR="$TMP/og_ubsan" bash test/test_og_router/run.sh 2>&1) || { echo "$out" | tail -5; exit 1; }
+  echo "$out" | tail -1
+  bin=$(sed -n 's/^binary: //p' <<<"$out")
+  sweep "$bin"
+  echo "host tests (ubsan): all pass"
+  exit 0
+fi
+
 for t in test_og_router test_og_analog test_pair_str test_rx_witness test_mp_rung; do
-  echo "== $t"; bash "test/$t/run.sh" | tail -1
+  echo "== $t"
+  out=$(bash "test/$t/run.sh") || { echo "$out" | tail -20; exit 1; }
+  echo "$out" | tail -1
+  [ "$t" = test_og_router ] && OG_BIN=$(sed -n 's/^binary: //p' <<<"$out")
 done
-echo "== test_og_router rand 1 2000"
-line=$("${RUNNER_TEMP:-/tmp}/test_og_router/og/test_og_router" rand 1 2000 | tail -1); echo "$line"
-failed=$(sed -E 's/.*: ([0-9]+)\/2000 trials failed.*/\1/' <<<"$line")
-shorts=$(sed -E 's/.*, ([0-9]+) with SHORTS.*/\1/' <<<"$line")
-[ "$shorts" -eq 0 ] || { echo "FAIL: $shorts trials shorted"; exit 1; }
-[ "$failed" -le 136 ] || { echo "FAIL: $failed unrouted trials > floor 136"; exit 1; }
+echo "== test_og_router sweeps (og)"
+sweep "$OG_BIN"
 echo "host tests: all pass"

@@ -2470,6 +2470,12 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
         if (path[i].pathType == VIRTUAL) {
       continue;
     }
+        // A node this board does not map (TOP_RAIL/BOTTOM_RAIL on the rev 2)
+        // leaves its chip at -1: the sender already treats such a hop as
+        // open, so leave it unrouted instead of writing chipStates[-1].
+        if (path[i].chip[0] < 0 || path[i].chip[1] < 0) {
+      continue;
+    }
         // Idempotent re-entry: a path with both X lanes set and no pending alt
         // route is already committed. Skipping it lets the duplicate pass (and
         // any incremental startIndex call) re-run commitPaths without tearing
@@ -3071,6 +3077,8 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
         int swapped = 0;
 
+        if (path[i].chip[0] < 0 || path[i].chip[1] < 0) continue;   // unmapped node, see commitPaths
+
         if (path[i].altPathNeeded == true)
         {
 
@@ -3323,7 +3331,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             path[i].chip[2] = bb;
                             path[i].chip[3] = bb;
                             ch[path[i].chip[0]].xStatus[xMapL0c0] = path[i].net;
-                            ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
+                            if (SFnode >= 0) ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
 
                             ch[path[i].chip[2]].xStatus[xMapL0c1] = path[i].net;
                             ch[path[i].chip[2]].xStatus[xMapBB] = path[i].net;
@@ -3359,7 +3367,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             path[i].chip[2] = bb;
                             path[i].chip[3] = bb;
                             ch[path[i].chip[0]].xStatus[xMapL1c0] = path[i].net;
-                            ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
+                            if (SFnode >= 0) ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
 
                             ch[path[i].chip[2]].xStatus[xMapL1c1] = path[i].net;
                             ch[path[i].chip[2]].xStatus[xMapBB] = path[i].net;
@@ -4070,7 +4078,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                     else
                                     {
                                         ch[CHIP_L].xStatus[xMapForNode(path[i].node2, CHIP_L)] = path[i].net;
-                                        ch[sfChip1].xStatus[xMapForNode(path[i].node1, sfChip1)] = path[i].net;
+                                        { int xi = xMapForNode(path[i].node1, sfChip1); if (xi >= 0) ch[sfChip1].xStatus[xi] = path[i].net; }
 
                                         if (debugNTCC2)
                                         {
@@ -4429,8 +4437,8 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                 path[i].x[0] = xMapForNode(path[i].node1, path[i].chip[0]);
                                 path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
-                                ch[path[i].chip[0]].xStatus[xMapForNode(path[i].node1, path[i].chip[0])] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapForNode(path[i].node2, path[i].chip[1])] = path[i].net;
+                                { int xi = xMapForNode(path[i].node1, path[i].chip[0]); if (xi >= 0) ch[path[i].chip[0]].xStatus[xi] = path[i].net; }
+                                { int xi = xMapForNode(path[i].node2, path[i].chip[1]); if (xi >= 0) ch[path[i].chip[1]].xStatus[xi] = path[i].net; }
 
                                 path[i].y[0] = bb;
                                 path[i].y[1] = bb;
@@ -4513,7 +4521,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 path[i].x[0] = xMapForNode(path[i].node1, path[i].chip[0]);
                                 path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
                                 ch[path[i].chip[0]].xStatus[xMapForNode(path[i].node1, path[i].chip[0])] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapForNode(path[i].node2, path[i].chip[1])] = path[i].net;
+                                { int xi = xMapForNode(path[i].node2, path[i].chip[1]); if (xi >= 0) ch[path[i].chip[1]].xStatus[xi] = path[i].net; }
                   // Serial.print(">>>> path ");
                   // Serial.println(i);
 
@@ -6337,6 +6345,7 @@ void swapNodes(int pathIndex) {
 
 int xMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;   // a node with no chip (rail / ISENSE on this board) asks with chip -1
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip].xMap[i] == node) {
       nodeFound = i;
@@ -6357,6 +6366,7 @@ int xMapForNode(int node, int chip) {
 
 int yMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;
   for (int i = 1; i < 8; i++) {
     if (globalState.connections.chipStates[chip].yMap[i] == node) {
       nodeFound = i;
@@ -6368,6 +6378,7 @@ int yMapForNode(int node, int chip) {
 
 int xMapForChipLane0(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       nodeFound = i;
@@ -6378,6 +6389,7 @@ int xMapForChipLane0(int chip1, int chip2) {
 }
 int xMapForChipLane1(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 15; i++) {   // i+1 below: 15 is the last valid pair start
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       if (globalState.connections.chipStates[chip1].xMap[i + 1] == chip2) {
