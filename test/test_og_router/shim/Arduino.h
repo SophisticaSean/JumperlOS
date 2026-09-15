@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdarg>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -36,6 +37,8 @@ inline long map(long x,long,long,long,long){return x;}
 struct Stream {
   virtual ~Stream(){}
   virtual size_t write(uint8_t c){ return fputc(c, stdout)>=0; }
+  int availableForWrite(){ return 4096; }
+  int printf(const char* f, ...){ va_list a; va_start(a,f); int n=vprintf(f,a); va_end(a); return n; }
   template<typename T> size_t print(T v){ std::string s = toStr(v); fputs(s.c_str(), stdout); return s.size();}
   template<typename T> size_t println(T v){ size_t n=print(v); fputs("\n", stdout); return n+1;}
   size_t println(){ fputs("\n", stdout); return 1;}
@@ -49,7 +52,6 @@ struct Stream {
   void print(double v, int){ printf("%f", v);}
   void println(int v, int){ printf("%d\n", v);}
   void println(float v, int){ printf("%f\n", v);}
-  void printf(const char* fmt, ...){ va_list a; va_start(a,fmt); vprintf(fmt,a); va_end(a);}
   void flush(){ fflush(stdout);}
   int available(){return 0;}
   int read(){return -1;}
@@ -77,3 +79,5 @@ private:
 extern Stream Serial;
 extern Stream Serial1;
 inline void changeTerminalColor(int=0,bool=false,Stream* =nullptr){}
+
+inline char* itoa(int v, char* b, int) { sprintf(b, "%d", v); return b; }

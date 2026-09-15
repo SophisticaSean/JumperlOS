@@ -32,6 +32,7 @@
 #include "States.h"
 #include "NetsToChipConnections.h"
 #include "NetManager.h"
+#include "Probing.h"
 #include "FakeGpio.h"
 #include "Peripherals.h"
 #include "Graphics.h"
@@ -56,7 +57,7 @@ FakeGpioOutput fakeGpioOutputs[MAX_FAKE_GP_OUT];
 FakeGpioInput fakeGpioInputs[MAX_FAKE_GP_IN];
 int fakeGpioInputAdcChannel = -1;
 int gpioNet[10]; int gpioReading[10]; int gpioDef[10][3]; int showADCreadings[8]; uint32_t gpioReadingColors[10];
-int newBridgeLength = 0; int numberOfShownNets = 0;
+int numberOfShownNets = 0;
 #include "nano_init.inc"
 // The firmware's initNets() reinitialises every net and resets the per-net
 // bridge pool; the harness fills the nets itself, so the stub keeps the reset.
@@ -66,8 +67,13 @@ void initNets(void) {
 #endif
 }
 bool infraIsBridge(int, int) { return false; }
-void assignTermColor(int) {}
-void printBridgeArray(Stream*) {}
+// Definitions for what the real NetManager.cpp's display code references
+// (all inert on the host).
+TimeDomainMultiplexer tdmInputs; rgbColor netColors[MAX_NETS]; uint8_t gpioAnimationBaseHues[10];
+int brightenedNode = -1; float adcReadings[8]; int gpioState[50]; Probing probing;
+int blockProbeButton = 0; unsigned long blockProbeButtonTimer = 0;
+static int hrStore = -1, hnStore = -1; int& highlightedRow = hrStore; int& highlightedNet = hnStore;
+Stream USBSer3; char* netNameConstants[MAX_NETS];
 static bool digest = false;   // print the closed crosspoints per case/trial (compare two builds)
 static std::string lastDigest; // the closed crosspoints of the last runCase
 static long healthBridges = 0, healthUnrouted = 0, healthUnroutedButJoined = 0;   // PathHealth rule tallies
@@ -85,8 +91,6 @@ static std::string nodeName(int n) {
   if (n >= NANO_A0 && n <= NANO_A7) return "A" + std::to_string(n - NANO_A0);
   return "n" + std::to_string(n);
 }
-int printNodeOrName(int node, int, int, Stream* s) { return s->print(nodeName(node)); }
-const char* definesToChar(int n, int) { static std::string s; s = nodeName(n); return s.c_str(); }
 
 // ---------- physical crossbar model (OG rev 2) ----------
 static const board::BoardTopology& B = board::ogBoardTopology;
@@ -345,6 +349,56 @@ int main(int argc, char** argv) {
     ok &= sizeof(pathStruct) <= 40 + 4 * (sizeof(enum pathType) - 1)
        && sizeof(netStruct) <= 104 + 4 * (sizeof(void*) - 4)
        && netbridges::capacity() >= 2 * MAX_BRIDGES;
+    printf("  %s\n", ok ? "PASS" : "FAIL"); fails += !ok;
+  }
+  // 7b: the same pool driven by the REAL NetManager path (the firmware's
+  // refreshConnections order: initNets, bridges[] in globalState,
+  // loadBridgesFromState, getNodesToConnect). Then a bridge that joins two
+  // user nets exercises combineNets -> deleteNet -> shiftNets ->
+  // netbridges::clear/detach: the pool must hold exactly the surviving
+  // bridges, and 0 after initNets. (Calling combineNets directly would not
+  // do: it consumes file globals that getNodesToConnect sets.)
+  {
+    printf("\n=== 7b: pool through the real NetManager (getNodesToConnect / combineNets) ===\n");
+    bool ok = true;
+    auto setup = [&](std::vector<std::pair<int,int>> bridges) {
+      initNets();
+      for (int i = 0; i < MAX_NETS; i++) globalState.connections.nets[i] = netStruct{};
+      // like initNets: net 0 is the EMPTY_NET sentinel (findFirstUnusedNetIndex
+      // treats nodes[0] <= 0 as free), 1..5 the special-function nets
+      const int baseNode[6] = {EMPTY_NET, GND, TOP_RAIL, BOTTOM_RAIL, DAC0, DAC1};
+      globalState.connections.nets[0].number = 127;
+      for (int i = 0; i <= 5; i++) { if (i) globalState.connections.nets[i].number = i; globalState.connections.nets[i].nodes[0] = baseNode[i]; globalState.connections.nets[i].specialFunction = baseNode[i]; }
+      globalState.connections.numNets = 6;
+      globalState.connections.numBridges = 0;
+      for (auto& b : bridges) { globalState.connections.bridges[globalState.connections.numBridges][0] = b.first; globalState.connections.bridges[globalState.connections.numBridges][1] = b.second; globalState.connections.numBridges++; }
+      loadBridgesFromState(); getNodesToConnect();
+    };
+    auto netOf = [&](int node) { for (int i = 1; i < MAX_NETS; i++) { netStruct& n = globalState.connections.nets[i]; if (n.number == 0) continue; for (int k = 0; k < MAX_NODES && n.nodes[k] != 0; k++) if (n.nodes[k] == node) return i; } return -1; };
+    // two separate user nets + one GND net: 5 bridges live in the pool
+    setup({{1,2},{2,3},{10,11},{GND,20},{GND,21}});
+    ok &= netbridges::poolUsed() == 5;
+    int nA = netOf(1), nB = netOf(10); ok &= nA > 5 && nB > 5 && nA != nB && netOf(20) == 1;
+    ok &= netbridges::count(globalState.connections.nets[nA]) == 2 && netbridges::count(globalState.connections.nets[nB]) == 1 && netbridges::count(globalState.connections.nets[1]) == 2;
+    printf("  after 5 bridges: poolUsed=%d nets(1)=%d nets(10)=%d GND=%d  %s\n", netbridges::poolUsed(), nA, nB, netOf(20), ok ? "ok" : "BAD");
+    // the joining bridge: A and B merge (combineNets -> deleteNet -> shiftNets)
+    setup({{1,2},{2,3},{10,11},{GND,20},{GND,21},{3,10}});
+    ok &= netbridges::poolUsed() == 6;
+    int nJ = netOf(1); ok &= nJ > 5 && netOf(10) == nJ && netOf(11) == nJ && netOf(3) == nJ;
+    ok &= netbridges::count(globalState.connections.nets[nJ]) == 4;   // 1-2, 2-3, 10-11, 3-10 all filed on the survivor
+    // no other net still claims those bridges (detach, not clear, on the shifted copy)
+    int filed = 0; for (int i = 1; i < MAX_NETS; i++) if (globalState.connections.nets[i].number) filed += netbridges::count(globalState.connections.nets[i]);
+    ok &= filed == 6;
+    printf("  after the join: poolUsed=%d merged net=%d bridges on it=%d filed total=%d  %s\n", netbridges::poolUsed(), nJ, netbridges::count(globalState.connections.nets[nJ]), filed, ok ? "ok" : "BAD");
+    // routing still agrees with the harness's own path (no short, everything joined)
+    ok &= runCase("7b: routed after the merge", {{6, {1,2,3,10,11}, {{1,2},{2,3},{10,11},{3,10}}}, {1, {GND,20,21}, {{GND,20},{GND,21}}}}, verbose);
+    // and initNets frees everything
+    initNets(); ok &= netbridges::poolUsed() == 0;
+#if defined(OG_JUMPERLESS)
+    // node > 255 never enters a net's node list (OG-only int8 path storage;
+    // addNodeToNet refuses it and says so - the bridge itself is still filed)
+    setup({{1,300}}); ok &= netOf(300) == -1;
+#endif
     printf("  %s\n", ok ? "PASS" : "FAIL"); fails += !ok;
     netbridges::resetAll();
   }

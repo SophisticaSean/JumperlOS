@@ -8,9 +8,24 @@
 # board descriptors are used as-is; `nano` is lifted out of MatrixState.cpp.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-BUILD=${BUILD_DIR:-/tmp/test_og_router}
+# BOARD=og (default) builds the OG router against the rev 2 topology; BOARD=v5
+# builds NetsToChipConnections.cpp against board_v5.cpp. NTCC_SRC=<file>
+# substitutes another router source (a digest of the previous commit's router
+# through the same harness). Per-board build dirs so the two never race.
+BOARD=${BOARD:-og}
+BUILD=${BUILD_DIR:-${RUNNER_TEMP:-/tmp}/test_og_router}/$BOARD
 mkdir -p "$BUILD"
-cp src/routing/NetsToChipConnections_OG.cpp "$BUILD/NetsToChipConnections_OG.cpp"
+if [ "$BOARD" = v5 ]; then
+  NTCC=${NTCC_SRC:-src/routing/NetsToChipConnections.cpp}; DEF=""; BOARDCPP=src/boards/v5/board_v5.cpp
+else
+  NTCC=${NTCC_SRC:-src/routing/NetsToChipConnections_OG.cpp}; DEF="-DOG_JUMPERLESS"; BOARDCPP=src/boards/og/board_og.cpp
+fi
+cp "$NTCC" "$BUILD/NetsToChipConnections_OG.cpp"
+# The real NetManager.cpp is linked (its quote-includes must resolve to the
+# shims, so it is copied beside the router); the shim dir carries no
+# NetManager.h on purpose - the real one is what the harness compiles against.
+cp src/routing/NetManager.cpp "$BUILD/NetManager.cpp"
+cp src/routing/NetManager.h "$BUILD/NetManager.h"
 awk '/^struct nanoStatus nano = \{/{p=1} p{print} p&&/^  \};/{exit}' src/routing/MatrixState.cpp > "$BUILD/nano_init.inc"
 # -Os: the firmware's optimization level (some of the bugs this test guards
 # only show under optimization, e.g. a 0xFF bool compared == true).
@@ -29,8 +44,9 @@ awk '/^struct nanoStatus nano = \{/{p=1} p{print} p&&/^  \};/{exit}' src/routing
 #   OG_ROUTER_DIGEST=1 ./test_og_router            # per fixed case
 #   OG_ROUTER_DIGEST=1 ./test_og_router rand 1 2000 # per trial
 # diff the outputs of the old and new tree: identical = identical routing.
-${CXX:-g++} -std=gnu++17 ${CXXFLAGS:--Os} -DOG_JUMPERLESS \
-    -Itest/test_og_router/shim -Isrc -Isrc/routing -I"$BUILD" \
-    "$BUILD/NetsToChipConnections_OG.cpp" src/boards/board.cpp src/boards/og/board_og.cpp \
+${CXX:-g++} -std=gnu++17 ${CXXFLAGS:--Os} $DEF \
+    -Itest/test_og_router/shim -I"$BUILD" -Isrc -Isrc/routing \
+    "$BUILD/NetsToChipConnections_OG.cpp" "$BUILD/NetManager.cpp" src/boards/board.cpp "$BOARDCPP" \
     test/test_og_router/test_og_router.cpp -o "$BUILD/test_og_router"
+echo "binary: $BUILD/test_og_router"
 "$BUILD/test_og_router" "$@"

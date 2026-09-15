@@ -3,6 +3,7 @@
 #include "JumperlessDefines.h"
 #include "config.h"
 #include "MatrixState.h"
+#include "LEDs.h"
 struct justXY { int8_t xStatus[16]; int8_t yStatus[8]; };
 struct ConnectionState {
     int16_t bridges[MAX_BRIDGES][3];
@@ -17,5 +18,10 @@ struct ConnectionState {
     struct justXY chipXY[12];
     bool chipStatesCacheValid;
 };
-struct JumperlessState { ConnectionState connections; };
+struct DisplayState {
+    bool getNetColor(int, rgbColor&, uint32_t&, char*) const { return false; }
+    const char* getNetName(int) const { return nullptr; }
+};
+struct PowerState { float topRail = 0, bottomRail = 0, dac0 = 0, dac1 = 0; };
+struct JumperlessState { ConnectionState connections; DisplayState display; PowerState power; };
 extern JumperlessState globalState;
