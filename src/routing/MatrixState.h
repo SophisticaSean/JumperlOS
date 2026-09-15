@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include "JumperlessDefines.h"
 #include "LEDs.h"
+#include "NetBridges.h"
 
 
 
@@ -14,15 +15,22 @@ int16_t number; //nets are uint8_t, nodes are int8_t
 
 const char *name; // human readable "Net 3"
 
-int16_t nodes[MAX_NODES];//maybe make this smaller and allow nets to just stay connected currently 64x64 is 4 Kb
+jl_netNode_t nodes[MAX_NODES]; // member nodes in insertion order, 0 = empty slot (nodes[0] is the net's "first node"). Node ids are 1..199, so the OG stores them in a byte (jl_netNode_t); only addNodeToNet writes here.
 
+// The net's bridges as (node1, node2) pairs, in insertion order. Access ONLY
+// through netbridges:: (routing/NetBridges.h): on V5 this is the inline
+// table, on the OG it is a {head, tail, count} into the shared pool.
+#if defined(OG_JUMPERLESS)
+NetBridgeList bridges;
+#else
 int16_t bridges[MAX_NODES][2]; //either store them here or in one long array that references the net
+#endif
 
 int16_t specialFunction; // store #defined number for that special function -1 for regular net
 
 // int16_t intersections[8]; //if this net shares a node with another net, store this here. If it's a regular net, we'll need a function to just merge them into one new net. special functions can intersect though (except Power and Ground), 0x7f is a reserved empty net that nothing and intersect
 
-int16_t doNotIntersectNodes[8]; //if the net tries to share a node with a net that contains any #defined nodes here, it won't connect and throw an error (SUPPLY to GND)
+jl_netNode_t doNotIntersectNodes[8]; //if the net tries to share a node with a net that contains any #defined nodes here, it won't connect and throw an error (SUPPLY to GND)
 
 int8_t visible; //this isn't implemented - priority = 1 means it will move connections to take the most direct path, priority = 2 means connections will be doubled up when possible, priority = 3 means both
 
@@ -36,14 +44,70 @@ char *colorName; //name of the color
 
 // bool machine; //whether this net was created by the machine or by the user
 
-int priority; //when duplicating paths, it will make this many copies every time it runs through
+jl_netSmall_t priority; //when duplicating paths, it will make this many copies every time it runs through (only ever 0 or 1)
 
 // int duplicatePaths[MAX_DUPLICATE];
-int numberOfDuplicates; // if the paths are redundant (for lower resistance) this is the number of duplicates
+jl_netSmall_t numberOfDuplicates; // if the paths are redundant (for lower resistance) this is the number of duplicates (0..MAX_DUPLICATE)
 
 uint8_t termColor; //terminal color index for 255 color mode (default is white)
 //uint16_t uniqueID; //this is a unique ID for the net, it's used to identify the net in the machine
 };
+
+// netbridges:: bodies (declared in NetBridges.h, need the complete netStruct).
+namespace netbridges {
+#if defined(OG_JUMPERLESS)
+inline Iter begin(const netStruct& n) { return Iter{n.bridges.head}; }
+inline int count(const netStruct& n) { return n.bridges.count; }
+inline bool append(netStruct& n, int16_t node1, int16_t node2) {
+  NetBridgePool& p = netBridgePool;
+  if (!p.initialised) resetAll();
+  uint8_t e = p.freeHead;
+  if (e == 0) return false;  // pool full: the caller reports it
+  p.freeHead = p.entries[e].next;
+  p.used++;
+  p.entries[e].node1 = node1;
+  p.entries[e].node2 = node2;
+  p.entries[e].next = 0;
+  if (n.bridges.head == 0) n.bridges.head = e; else p.entries[n.bridges.tail].next = e;
+  n.bridges.tail = e;
+  n.bridges.count++;
+  return true;
+}
+inline void detach(netStruct& n) { n.bridges.head = 0; n.bridges.tail = 0; n.bridges.count = 0; }
+inline void clear(netStruct& n) {
+  NetBridgePool& p = netBridgePool;
+  if (p.initialised) {
+    uint8_t e = n.bridges.head;
+    while (e != 0) {
+      uint8_t nx = p.entries[e].next;
+      p.entries[e].next = p.freeHead;
+      p.freeHead = e;
+      if (p.used) p.used--;
+      e = nx;
+    }
+  }
+  detach(n);
+}
+#else
+inline Iter begin(const netStruct& n) { return Iter{n.bridges, 0}; }
+inline int count(const netStruct& n) { int k = 0; while (k < MAX_NODES && n.bridges[k][0] != 0) k++; return k; }
+inline bool append(netStruct& n, int16_t node1, int16_t node2) {
+  int k = count(n);
+  if (k >= MAX_NODES) return false;
+  n.bridges[k][0] = node1;
+  n.bridges[k][1] = node2;
+  return true;
+}
+inline void clear(netStruct& n) {
+  for (int k = 0; k < MAX_NODES; k++) {
+    if (n.bridges[k][0] == 0) break;
+    n.bridges[k][0] = 0;
+    n.bridges[k][1] = 0;
+  }
+}
+inline void detach(netStruct& n) { clear(n); }
+#endif
+} // namespace netbridges
 
 // NOTE: net[] now accessed via globalState.connections.nets[]
 
@@ -52,17 +116,23 @@ enum pathType {BBtoBB, BBtoNANO, NANOtoNANO, BBtoSF, NANOtoSF, BBtoBBL, NANOtoBB
 
 enum nodeType {BB, NANO, SF, BBL};
 
+// Storage: V5 keeps int everywhere; the OG narrows to jl_pathIdx_t (int8_t) /
+// jl_pathNode_t (int16_t) - 128 B -> 40 B per path. Every writer is the
+// router; the value ranges are: chip -1..11, x -2..15, y -2..7 (-2 = deferred
+// hop, -1 = unused), candidates = chip numbers, net -1..MAX_NETS-1,
+// altPathNeeded 0/1, duplicate 0/1/2, node ids -1 / 0..199. clearAllNTCC()
+// memsets the whole array to -1, which every signed field reads back as -1.
 struct pathStruct{
 
-  int node1; //these are the rows or nano header pins to connect
-  int node2;
-  int net; 
+  jl_pathNode_t node1; //these are the rows or nano header pins to connect
+  jl_pathNode_t node2;
+  jl_pathIdx_t net; 
 
-  int chip[4];
-  int x[6];
-  int y[6];
-  int candidates[3][3]; //[node][candidate]
-  int altPathNeeded;
+  jl_pathIdx_t chip[4];
+  jl_pathIdx_t x[6];
+  jl_pathIdx_t y[6];
+  jl_pathIdx_t candidates[3][3]; //[node][candidate]
+  jl_pathIdx_t altPathNeeded;
   enum pathType pathType;
   enum nodeType nodeType[3];
   bool sameChip;
@@ -77,7 +147,7 @@ struct pathStruct{
 
 
 
-  int duplicate = 0; // the "parent" path if 1, the "child" path if 2, 0 if not a duplicate
+  jl_pathIdx_t duplicate = 0; // the "parent" path if 1, the "child" path if 2, 0 if not a duplicate
 
 };
 
@@ -92,7 +162,7 @@ bool isConnectable(int node);
 bool connectionAllowed(int node1, int node2);
 // NOTE: path[] array is now defined via macro (see below)
 
-extern int globalDoNotIntersects[60][2];
+extern const int globalDoNotIntersects[60][2];
 
 extern char *netNameConstants[MAX_NETS];
 
@@ -127,11 +197,11 @@ struct nodeStruct{
   int16_t define;
 };
 
-extern struct nodeStruct nodeNames[30];
+extern const struct nodeStruct nodeNames[30];
 
-extern const char *connectionNamesX[12][16];
+extern const char * const connectionNamesX[12][16];
 
-extern const char *connectionNamesY[12][8];
+extern const char * const connectionNamesY[12][8];
 
 char* xName(int chip, int x);
 
@@ -185,7 +255,7 @@ extern struct nanoStatus nano;
         int replacement;
     };
 
-extern struct SFmapPair sfMappings[100];
+extern const struct SFmapPair sfMappings[100];
 
 
 

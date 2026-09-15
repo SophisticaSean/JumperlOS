@@ -142,7 +142,8 @@ struct ConnectionState {
     bool pathsCacheValid;  // Set to false when connections change
     
     chipStatus chipStates[12];  // Derived from paths
-    struct justXY chipXY[12];   // Crossbar switch states (reconstructed from paths)
+    // (a `struct justXY chipXY[12]` used to sit here - 1536 B that nothing
+    // ever read; the live crossbar image is CH446Q.cpp's lastChipXY[].)
     bool chipStatesCacheValid;
     
     ConnectionState();
@@ -689,6 +690,9 @@ public:
     bool isDirty() const { return dirty; }
     void clearDirty();
     unsigned long getLastModifiedTime() const { return lastModifiedTime; }
+    // millis() of the clean->dirty edge (lastModifiedTime moves on every
+    // mutation, so it cannot age the slot); 0 while clean.
+    unsigned long getDirtySince() const { return dirtySinceMs; }
     
     // Validation
     bool validate(String& errorMsg) const;
@@ -713,6 +717,7 @@ private:
     // Dirty flag infrastructure
     bool dirty;
     unsigned long lastModifiedTime;
+    unsigned long dirtySinceMs = 0;
     
     // Ephemeral connections tracking (never saved to YAML)
     static constexpr int MAX_EPHEMERAL_CONNECTIONS = 8;

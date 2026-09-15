@@ -1,0 +1,36 @@
+name: Host tests
+
+# The router / analog / pair_str / RX-witness / heap-rung harnesses compile
+# the real source against shims on the runner - seconds, no toolchain, no
+# board. Runs on every push (the fork's working branches have no PR) and on
+# PRs; macOS proves the no-gawk/no-glibc claim (BSD awk, libc rand-free
+# sweep); the ubsan leg runs the router with sanitizers and recovery off.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, leg: gcc }
+          - { os: macos-latest,  leg: gcc }
+          - { os: ubuntu-latest, leg: ubsan }
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.leg == 'gcc'
+        run: test/host_tests.sh
+      - if: matrix.leg == 'ubsan'
+        run: CXX=clang++ test/host_tests.sh ubsan

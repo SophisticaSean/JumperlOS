@@ -135,8 +135,9 @@ extern bool debugNTCC5;
 extern volatile int numberOfPaths;
 
 // Storage for original net numbers of fake GPIO input paths
-static int fakeGpioInputOriginalNets[MAX_BRIDGES];
-static int fakeGpioInputPathIndices[MAX_BRIDGES];
+// Net numbers (-1..MAX_NETS-1) and path indexes (0..MAX_BRIDGES-1): a byte each.
+static int8_t fakeGpioInputOriginalNets[MAX_BRIDGES];
+static int8_t fakeGpioInputPathIndices[MAX_BRIDGES];
 static int numFakeGpioInputPaths = 0;
 
 // Check if a path is a FAKE_GP_IN path by checking its node endpoints directly.
@@ -359,7 +360,7 @@ int numberOfUniqueNets = 0;
 int numberOfNets = 0;
 volatile int numberOfPaths = 0;
 
-int pathsWithCandidates[MAX_BRIDGES] = {0};
+int8_t pathsWithCandidates[MAX_BRIDGES] = {0};  // path indexes, 0..MAX_BRIDGES-1
 int pathsWithCandidatesIndex = 0;
 
 int numberOfUnconnectablePaths = 0;
@@ -779,6 +780,16 @@ bool setChipYStatusSafe(int chip, int y, int net, const char *location) {
     return false; // Assignment failed due to conflict
   }
 
+  // OG: BB chip Y0 <-> L Y[chip] is one wire; reserve (and conflict-check) both
+  // ends. See freeOrSameNetY.
+  int mirrorChip = -1, mirrorY = -1;
+  if (chip < 8 && y == 0) { mirrorChip = CHIP_L; mirrorY = chip; }
+  else if (chip == CHIP_L) { mirrorChip = y; mirrorY = 0; }
+  if (mirrorChip != -1) {
+    int8_t other = globalState.connections.chipStates[mirrorChip].yStatus[mirrorY];
+    if (other != -1 && other != net) return false;
+    globalState.connections.chipStates[mirrorChip].yStatus[mirrorY] = net;
+  }
   // Assign the Y position
   globalState.connections.chipStates[chip].yStatus[y] = net;
 
@@ -1301,12 +1312,16 @@ void clearAllNTCC(void) {
   pathsToClear = MAX_BRIDGES; // yeah fuck that
   
   // Fast bulk clear with memset
-  memset(pathsWithCandidates, 0, pathsToClear * sizeof(int));
+  memset(pathsWithCandidates, 0, pathsToClear * sizeof(pathsWithCandidates[0]));
   memset(globalState.connections.paths, -1, pathsToClear * sizeof(pathStruct));
   for (int i = 0; i < pathsToClear; i++) {
     globalState.connections.paths[i].altPathNeeded = 0;
     globalState.connections.paths[i].skip = 0;
-
+    // The memset above leaves every bool at 0xFF. The OG-only Lchip flag is
+    // only ever SET (never cleared) by the router, and `Lchip == true` on a
+    // 0xFF bool is true under -Os (gcc tests the byte for nonzero), so without
+    // this every BBtoSF alt path took the chip-L hop branch on the firmware.
+    globalState.connections.paths[i].Lchip = false;
   }
   // //clang-format off
   // struct netStruct globalState.connections.nets[MAX_NETS] = { //these are the special function nets
@@ -1450,18 +1465,15 @@ void sortPathsByNet(
       break;
     }
 
-    for (int k = 0; k < MAX_NODES; k++) {
-      if (globalState.connections.nets[j].bridges[k][0] == 0) {
-        break;
-        // continue;
-      } else {
+    for (netbridges::Iter it = netbridges::begin(globalState.connections.nets[j]); it.valid(); it.next()) {
+      {
         // paths[] is [MAX_BRIDGES], but the per-net entries can total more than
         // that: combineNets lists one merged bridge under both surviving nets.
         if (pathIndex >= MAX_BRIDGES) {
           break;
         }
-        int node1 = globalState.connections.nets[j].bridges[k][0];
-        int node2 = globalState.connections.nets[j].bridges[k][1];
+        int node1 = it.node1();
+        int node2 = it.node2();
         
         globalState.connections.paths[pathIndex].net = globalState.connections.nets[j].number;
         globalState.connections.paths[pathIndex].node1 = node1;
@@ -1969,16 +1981,7 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
       // Serial.println(globalState.connections.nets[n].nodes[i]);
     }
 
-    for (int i = 0; i < MAX_NODES; i++) {
-      if (globalState.connections.nets[n].bridges[i][0] == 0) {
-        break;
-      }
-      bridgeCount[n]++;
-      // Serial.print(" \n\rbridges: ");
-      // Serial.print(globalState.connections.nets[n].bridges[i][0]);
-      // Serial.print("-");
-      // Serial.println(globalState.connections.nets[n].bridges[i][1]);
-    }
+    bridgeCount[n] = netbridges::count(globalState.connections.nets[n]);
     // Serial.println("\n\r");
   }
 
@@ -1993,10 +1996,11 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
   int duplindex = 0;
   // Keep these off stack to avoid intermittent stack-overflow crashes while
   // routing (fillUnusedPaths can be called deep in the routing pipeline).
-  static int bridgeDuplicateBudget[MAX_BRIDGES];
-  static int bridgeNode1[MAX_BRIDGES];
-  static int bridgeNode2[MAX_BRIDGES];
-  static int bridgeNet[MAX_BRIDGES];
+  // Mirrors of bridges[][0..2] (int16_t) and the net number: same widths.
+  static int16_t bridgeDuplicateBudget[MAX_BRIDGES];
+  static int16_t bridgeNode1[MAX_BRIDGES];
+  static int16_t bridgeNode2[MAX_BRIDGES];
+  static int8_t bridgeNet[MAX_BRIDGES];
   int maxDuplicateRounds = 0;
   int bridgesToProcess = globalState.connections.numBridges;
   if (bridgesToProcess > MAX_BRIDGES) {
@@ -2427,6 +2431,12 @@ void swapDuplicateNode(int pathIndex)
             }
 
             path[pathIndex].chip[1] = duplucateSFnodes[i][2];
+            // The node may have moved on or off chip L (5V: L X14 <-> J X14,
+            // ADC0: L X2 <-> I X13, ...). The alt-path loops branch on Lchip
+            // BEFORE they re-read chip[1], so a stale flag runs the chip-L hop
+            // logic against chip I/J/K and closes that chip's Y0 for a hop that
+            // only exists on L (seen as ADC1 shorted to 5V through J Y0).
+            path[pathIndex].Lchip = (path[pathIndex].chip[0] == CHIP_L || path[pathIndex].chip[1] == CHIP_L);
             break;
 
             // path[pathIndex].x[1] = duplucateSFnodes[i][3];
@@ -2458,6 +2468,12 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
     {
         // Skip virtual (FakeGPIO) paths; they're handled by the FakeGPIO layer.
         if (path[i].pathType == VIRTUAL) {
+      continue;
+    }
+        // A node this board does not map (TOP_RAIL/BOTTOM_RAIL on the rev 2)
+        // leaves its chip at -1: the sender already treats such a hop as
+        // open, so leave it unrouted instead of writing chipStates[-1].
+        if (path[i].chip[0] < 0 || path[i].chip[1] < 0) {
       continue;
     }
         // Idempotent re-entry: a path with both X lanes set and no pending alt
@@ -2666,7 +2682,7 @@ void commitPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, int s
         case BBtoSF: // nodes should always be in order of the enum, so node1 is BB and node2 is SF
         {
 
-            if (path[i].chip[0] != CHIP_L && path[i].chip[1] == CHIP_L) // if theyre both chip L we'll deal with it differently
+            if (path[i].chip[0] >= 0 && path[i].chip[0] < 8 && path[i].chip[1] == CHIP_L) // BB chip A..H -> chip L (SF chip I..K -> L is an L-hop, see resolveAltPaths)
             {
                 // Serial.print("\tBBtoCHIP L  \n\n\n\n");
                 int yMapBBc0 = 0; // y 0 is always connected to chip L
@@ -3061,6 +3077,8 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
         int swapped = 0;
 
+        if (path[i].chip[0] < 0 || path[i].chip[1] < 0) continue;   // unmapped node, see commitPaths
+
         if (path[i].altPathNeeded == true)
         {
 
@@ -3091,6 +3109,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                     if (path[i].Lchip == true)
                     {
                         // Serial.print("Lchip!!!!!!!!!!!!");
+                        if (bb == path[i].chip[0])
+                        {
+                            continue; // no chip has an X lane to itself (xMapForChipLane0 would be -1 and index xStatus[-1])
+                        }
                         if (ch[CHIP_L].yStatus[bb] == -1 || ch[CHIP_L].yStatus[bb] == path[i].net) /////////
                         {
 
@@ -3160,7 +3182,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 ch[path[i].chip[2]].yStatus[0] = path[i].net;
 
                                 path[i].x[0] = xMapForChipLane1(path[i].chip[0], path[i].chip[2]);
-                                path[i].x[1] = xMapL1c1;
+                                // x[1] is the SF node's pin on chip L, not the hop lane (the
+                                // lane-0 arm above has it right; this arm stamped xMapL1c1 and
+                                // closed whatever L pin that index happened to be).
+                                path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
 
                                 path[i].x[2] = xMapForChipLane1(path[i].chip[2], path[i].chip[0]);
                                 // path[i].x[3] = -2;
@@ -3306,7 +3331,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             path[i].chip[2] = bb;
                             path[i].chip[3] = bb;
                             ch[path[i].chip[0]].xStatus[xMapL0c0] = path[i].net;
-                            ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
+                            if (SFnode >= 0) ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
 
                             ch[path[i].chip[2]].xStatus[xMapL0c1] = path[i].net;
                             ch[path[i].chip[2]].xStatus[xMapBB] = path[i].net;
@@ -3342,7 +3367,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             path[i].chip[2] = bb;
                             path[i].chip[3] = bb;
                             ch[path[i].chip[0]].xStatus[xMapL1c0] = path[i].net;
-                            ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
+                            if (SFnode >= 0) ch[path[i].chip[1]].xStatus[SFnode] = path[i].net;
 
                             ch[path[i].chip[2]].xStatus[xMapL1c1] = path[i].net;
                             ch[path[i].chip[2]].xStatus[xMapBB] = path[i].net;
@@ -3679,9 +3704,9 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 break;
               }
             }
-                    if (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1)
+                    if ((xMapL1c0 != -1) && (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1))
                     {
-                        if (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1) // lanes 1 1
+                        if ((xMapL1c1 != -1) && (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1)) // lanes 1 1
                         {
                             ch[bb].xStatus[xMapL1c0] = path[i].net;
                             ch[bb].xStatus[xMapL1c1] = path[i].net;
@@ -3746,7 +3771,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
             }
                     if (ch[bb].xStatus[xMapL0c0] == path[i].net || ch[bb].xStatus[xMapL0c0] == -1)
                     {
-                        if (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1) // lanes 0 1
+                        if ((xMapL1c1 != -1) && (ch[bb].xStatus[xMapL1c1] == path[i].net || ch[bb].xStatus[xMapL1c1] == -1)) // lanes 0 1
                         {
 
                             if (giveUpOnL == 0)
@@ -3808,7 +3833,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                 break;
               }
             }
-                    if (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1)
+                    if ((xMapL1c0 != -1) && (ch[bb].xStatus[xMapL1c0] == path[i].net || ch[bb].xStatus[xMapL1c0] == -1))
                     {
                         if (ch[bb].xStatus[xMapL0c1] == path[i].net || ch[bb].xStatus[xMapL0c1] == -1) // lanes 1 0
                         {
@@ -3988,7 +4013,16 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                     Serial.println();
                                 }
-                                if ((ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsSF])] == -1) && (ch[hopBB].yStatus[0] == -1))
+                                // The hop chip's SF lane and its Y0 -> L lane may already carry THIS
+                                // net (GND on rows 1..30 owns the I/J lanes of A..D); that is the
+                                // best hop there is, not a conflict. Virgin-only here meant GND could
+                                // not reach a corner once its rows filled the lanes. Both ends of the
+                                // Y0 wire (chip Y0 and L Y[chip]) must be free-or-same-net.
+                                int hopLane = xMapForChipLane0(hopBB, path[i].chip[whichIsSF]);
+                                if (hopLane >= 0 &&
+                                    (ch[hopBB].xStatus[hopLane] == -1 || ch[hopBB].xStatus[hopLane] == path[i].net) &&
+                                    (ch[hopBB].yStatus[0] == -1 || ch[hopBB].yStatus[0] == path[i].net) &&
+                                    (ch[CHIP_L].yStatus[hopBB] == -1 || ch[CHIP_L].yStatus[hopBB] == path[i].net))
                                 {
                                     if (debugNTCC2)
                                     {
@@ -4014,7 +4048,12 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                     ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsSF])] = path[i].net;
 
-                                    ch[hopBB].xStatus[xMapForChipLane0(hopBB, path[i].chip[whichIsL])] = path[i].net;
+                                    {
+                                        // On the OG a BB chip reaches L through Y0, not an X lane, so
+                                        // this is -1 for CHIP_L; guard the index (it wrote xStatus[-1]).
+                                        int lLane = xMapForChipLane0(hopBB, path[i].chip[whichIsL]);
+                                        if (lLane >= 0) ch[hopBB].xStatus[lLane] = path[i].net;
+                                    }
 
                                     ch[hopBB].yStatus[0] = path[i].net;
                                     ch[CHIP_L].yStatus[hopBB] = path[i].net;
@@ -4039,7 +4078,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                     else
                                     {
                                         ch[CHIP_L].xStatus[xMapForNode(path[i].node2, CHIP_L)] = path[i].net;
-                                        ch[sfChip1].xStatus[xMapForNode(path[i].node1, sfChip1)] = path[i].net;
+                                        { int xi = xMapForNode(path[i].node1, sfChip1); if (xi >= 0) ch[sfChip1].xStatus[xi] = path[i].net; }
 
                                         if (debugNTCC2)
                                         {
@@ -4278,6 +4317,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                             int chip1Lane = xMapForNode(sfChip1, bb);
                             int chip2Lane = xMapForNode(sfChip2, bb);
+                            if (chip1Lane < 0 || chip2Lane < 0)
+                            {
+                                continue; // an SF chip with no X lane into bb (chip L): xStatus[-1] read as "busy" before
+                            }
 
                             if ((ch[CHIP_L].yStatus[bb] != -1 && ch[CHIP_L].yStatus[bb] != path[i].net))
                             {
@@ -4347,10 +4390,10 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                             continue;
                         }
 
-                        if (ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1)
+                        if ((chip1Lane != -1) && (ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1))
                         {
 
-                            if (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1)
+                            if ((chip2Lane != -1) && (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1))
                             {
                                 // Serial.println("VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV");
                                 // Serial.print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
@@ -4394,8 +4437,8 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                 path[i].x[0] = xMapForNode(path[i].node1, path[i].chip[0]);
                                 path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
-                                ch[path[i].chip[0]].xStatus[xMapForNode(path[i].node1, path[i].chip[0])] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapForNode(path[i].node2, path[i].chip[1])] = path[i].net;
+                                { int xi = xMapForNode(path[i].node1, path[i].chip[0]); if (xi >= 0) ch[path[i].chip[0]].xStatus[xi] = path[i].net; }
+                                { int xi = xMapForNode(path[i].node2, path[i].chip[1]); if (xi >= 0) ch[path[i].chip[1]].xStatus[xi] = path[i].net; }
 
                                 path[i].y[0] = bb;
                                 path[i].y[1] = bb;
@@ -4451,9 +4494,9 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
             // Serial.print("path: ");
             // Serial.println(i);
               // Serial.print("?????????????????????\n\r");
-                        if ((ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1) && foundHop == 0)
+                        if ((chip1Lane != -1) && (ch[bb].xStatus[chip1Lane] == path[i].net || ch[bb].xStatus[chip1Lane] == -1) && foundHop == 0)
                         {
-                            if (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1)
+                            if ((chip2Lane != -1) && (ch[bb].xStatus[chip2Lane] == path[i].net || ch[bb].xStatus[chip2Lane] == -1))
                             {
                   // Serial.print("path :");
                   // Serial.println(i);
@@ -4478,7 +4521,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 path[i].x[0] = xMapForNode(path[i].node1, path[i].chip[0]);
                                 path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
                                 ch[path[i].chip[0]].xStatus[xMapForNode(path[i].node1, path[i].chip[0])] = path[i].net;
-                                ch[path[i].chip[1]].xStatus[xMapForNode(path[i].node2, path[i].chip[1])] = path[i].net;
+                                { int xi = xMapForNode(path[i].node2, path[i].chip[1]); if (xi >= 0) ch[path[i].chip[1]].xStatus[xi] = path[i].net; }
                   // Serial.print(">>>> path ");
                   // Serial.println(i);
 
@@ -4563,6 +4606,16 @@ bool freeOrSameNetY(int chip, int y, int net, int allowStacking) {
   // Serial.print(" = ");
   if (globalState.connections.chipStates[chip].yStatus[y] == -1 ||
       (globalState.connections.chipStates[chip].yStatus[y] == net && allowStacking == 1)) {
+    // OG: a breadboard chip's Y0 and chip L's Y[that chip] are the SAME wire.
+    // A bounce on one side must see the other side's owner, or two nets can
+    // each bounce on "their" end of one lane (L Y2 vs C Y0) and short.
+    int mirrorChip = -1, mirrorY = -1;
+    if (chip < 8 && y == 0) { mirrorChip = CHIP_L; mirrorY = chip; }
+    else if (chip == CHIP_L) { mirrorChip = y; mirrorY = 0; }
+    if (mirrorChip != -1) {
+      int8_t other = globalState.connections.chipStates[mirrorChip].yStatus[mirrorY];
+      if (other != -1 && other != net) return false;
+    }
     // Serial.println("true");
     return true;
   } else {
@@ -4680,6 +4733,14 @@ void resolveUncommittedHops2(void) {}
 
 void resolveUncommittedHops(int allowStacking, int powerOnly,
                             int noOrOnlyDuplicates, int startIndex) {
+  // OG: the deferred (-2) slots this pass fills are the two halves of a bounce
+  // that the OG commit/alt branches have ALREADY reserved for this net (the hop
+  // chip's Y0 -> L lane, or a same-chip X shared by positions 0 and 2). The
+  // freeOrSameNetX/Y helpers only accept a same-net lane when allowStacking==1,
+  // so the main pass (allowStacking 2) must map to 1 exactly as commitPaths()
+  // does; otherwise the resolver refuses the net's own reservation and tears
+  // the whole path down. The duplicate pass (0) stays virgin-only.
+  allowStacking = (allowStacking == 0) ? 0 : 1;
   // OG-specific lane order: disallow bounces through SF / power X pins.
   int freeXSearchOrder[12][16] = {
       {-1, -1, 2, 3, 4, 5, 6, 7, 8, -1, 10, 11, 12, 13, 14, 15},
@@ -6284,6 +6345,7 @@ void swapNodes(int pathIndex) {
 
 int xMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;   // a node with no chip (rail / ISENSE on this board) asks with chip -1
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip].xMap[i] == node) {
       nodeFound = i;
@@ -6304,6 +6366,7 @@ int xMapForNode(int node, int chip) {
 
 int yMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;
   for (int i = 1; i < 8; i++) {
     if (globalState.connections.chipStates[chip].yMap[i] == node) {
       nodeFound = i;
@@ -6315,6 +6378,7 @@ int yMapForNode(int node, int chip) {
 
 int xMapForChipLane0(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       nodeFound = i;
@@ -6325,6 +6389,7 @@ int xMapForChipLane0(int chip1, int chip2) {
 }
 int xMapForChipLane1(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 15; i++) {   // i+1 below: 15 is the last valid pair start
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       if (globalState.connections.chipStates[chip1].xMap[i + 1] == chip2) {

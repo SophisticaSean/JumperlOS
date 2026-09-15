@@ -36,3 +36,10 @@ scripts/repro_menufx.py
 CodeDocs/MENU_SYSTEM_BUG_HUNT_HANDOFF.md
 __pycache__/
 .jumperless_port
+test/test_pair_str/test_pair_str
+test/test_og_router/test_og_router
+test/test_og_analog/test_og_analog
+test/test_rx_witness/test_rx_witness
+test/test_mp_rung/test_mp_rung
+test/test_slot_backstop/test_slot_backstop
+test/test_qstr_table/test_qstr_table

@@ -1,5 +1,6 @@
 #include "boards/board.h"   // caps.mpCHeapReserveKb
 #include "Python_Proper.h"
+#include "MpHeapRung.h"
 #include "Debugs.h"
 #include "KickGap.h" // would-be watchdog kick from the VM hook (T1.6 measure-only)
 #include "Adafruit_USBD_CDC.h"
@@ -841,25 +842,32 @@ static bool mpAllocHeap(void) {
   // ~40 KB of C heap in total, and 12 KB left behind is what its file paths
   // fit in (BoardCaps::mpCHeapReserveKb).
   const size_t MP_HEAP_C_RESERVE = (size_t)board::currentBoard( ).caps.mpCHeapReserveKb * 1024;
-  const size_t rungs[] = {configured, 64 * 1024, 48 * 1024,
-                          32 * 1024,  24 * 1024, 16 * 1024};
-  for (size_t i = 0; i < sizeof(rungs) / sizeof(rungs[0]); i++) {
-    size_t sz = rungs[i];
-    if (sz > configured) continue;  // never grow past the configured size
-    size_t freeHeap = rp2040.getFreeHeap();
-    if (sz + MP_HEAP_C_RESERVE > freeHeap) continue;
+  // The ladder itself lives in MpHeapRung.h (host-tested); the malloc
+  // fall-through below is the part that cannot: free total != largest
+  // contiguous block, so every admissible rung still has to survive malloc.
+  for (size_t i = 0; ; i++) {
+    size_t sz = mpNextRung(configured, i);
+    if (sz == 0) break;
+    if (!mpRungFits(sz, configured, MP_HEAP_C_RESERVE, rp2040.getFreeHeap())) continue;
     unsigned char *p = (unsigned char *)malloc(sz);
     if (!p) continue;  // fragmentation - try the next rung down
     mp_heap = p;
     mp_heap_size = sz;
     heapMark("MicroPython GC heap");
+    // Port 1, deliberately: a port-3-only message is invisible in the
+    // normal terminal, which is why the original failure took SWD to find.
+    // Always one line, so the rung actually taken is on record every boot.
     if (sz < configured) {
-      // Port 1, deliberately: a port-3-only message is invisible in the
-      // normal terminal, which is why the original failure took SWD to find.
       Serial.printf("[MP] GC heap: %d KB (configured %d KB doesn't fit; %d KB C heap left)\r\n",
           (int)(sz / 1024), (int)(configured / 1024),
           (int)(rp2040.getFreeHeap() / 1024));
     }
+#if defined(OG_JUMPERLESS)
+    else {
+      Serial.printf("[MP] GC heap: %d KB (%d KB C heap left)\r\n",
+          (int)(sz / 1024), (int)(rp2040.getFreeHeap() / 1024));
+    }
+#endif
     return true;
   }
   // Once. MpRemoteService retries this every service pass until it succeeds,

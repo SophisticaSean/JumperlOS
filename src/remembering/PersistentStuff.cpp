@@ -433,6 +433,15 @@ void readSettingsFromConfig() {
   // Routing stacking counts are read directly from jumperlessConfig.routing
   // by the routing code; no runtime mirrors needed here.
 
+#if defined(OG_JUMPERLESS)
+  // The [calibration] block is the V5's (adc zero 9.0 / spread 18.28, dac
+  // zero 1650 / spread 21.5, and the config defaults are those numbers).
+  // Applying it here clobbered the OG's constants on every config reload or
+  // save after boot: ADC1/2 read a floating input as 9.28 V, a DAC ask went
+  // to the wrong code. The OG has no user calibration ('$' is refused); its
+  // constants come from the board (og_analog.h) and nothing else.
+  ogApplyBoardCalibration();
+#else
   // DAC calibration
   dacSpread[0] = jumperlessConfig.calibration.dac_0_spread;
   dacSpread[1] = jumperlessConfig.calibration.dac_1_spread;
@@ -457,6 +466,7 @@ void readSettingsFromConfig() {
   adcZero[3] = jumperlessConfig.calibration.adc_3_zero;
   adcZero[4] = jumperlessConfig.calibration.adc_4_zero;
   adcZero[7] = jumperlessConfig.calibration.adc_7_zero;
+#endif
 
 
   // DAC voltages are now stored in globalState.power (loaded from YAML state file)

@@ -6,8 +6,14 @@
 
 MenuTransitionConfig menuTransitionConfig;
 
-// Breadboard region managed by the engine: rows 0-59, 5 pixels per row.
+// Breadboard region managed by the engine: rows 0-59, 5 pixels per row on the
+// V5. The OG strip is 111 pixels in total (board_og.cpp ledCount), so its
+// three frames cover the whole strip at 112 and save 3 x 752 B of .bss.
+#if defined(OG_JUMPERLESS)
+#define MENU_TRANSITION_PIXELS 112
+#else
 #define MENU_TRANSITION_PIXELS 300
+#endif
 
 // Frame snapshots. prevFrame is what the transition blends *from*, targetFrame
 // is the frame Core 0 just drew (what it blends *to*), accentFrame is the
