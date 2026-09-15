@@ -40,3 +40,4 @@ test/test_pair_str/test_pair_str
 test/test_og_router/test_og_router
 test/test_og_analog/test_og_analog
 test/test_rx_witness/test_rx_witness
+test/test_mp_rung/test_mp_rung

@@ -5,7 +5,7 @@
 # og-routing-perf measured (seed 1, 2000 trials: 136; lane exhaustion, not bugs).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-for t in test_og_router test_og_analog test_pair_str test_rx_witness; do
+for t in test_og_router test_og_analog test_pair_str test_rx_witness test_mp_rung; do
   echo "== $t"; bash "test/$t/run.sh" | tail -1
 done
 echo "== test_og_router rand 1 2000"
