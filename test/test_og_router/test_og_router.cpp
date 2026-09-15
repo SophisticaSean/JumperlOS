@@ -41,10 +41,8 @@
 
 Stream Serial; Stream Serial1; Stream Jerial;
 JumperlessState globalState;
-#if defined(NETBRIDGES_H) && defined(OG_JUMPERLESS)
+#ifdef NETBRIDGES_H
 NetBridgePool netBridgePool;   // the firmware defines this next to globalState (States.cpp)
-#elif defined(NETBRIDGES_H)
-// V5: netbridges:: is the inline per-net table (NetBridges.h), no pool object.
 #else
 // Building against a tree that predates routing/NetBridges.h (the digest
 // baseline): the same API over the old inline per-net table.
@@ -414,8 +412,8 @@ int main(int argc, char** argv) {
     printf("\n=== 6: MAX_BRIDGES=%d bridges in 6 nets ===\n  drops=%d shorts=%d unrouted=%d  %s\n", MAX_BRIDGES, drops, shorts, unrouted, (drops || shorts) ? "FAIL" : "PASS");
     fails += (drops || shorts) ? 1 : 0;
   }
-#if defined(NETBRIDGES_H) && defined(OG_JUMPERLESS)
-  // The OG pool itself: append / count / iteration order / clear frees /
+#ifdef NETBRIDGES_H
+  // The pool itself (both boards): append / count / iteration order / clear frees /
   // detach does not / merge keeps A's bridges before B's / exhaustion is
   // reported by append returning false, never by writing out of bounds.
   {
@@ -444,11 +442,14 @@ int main(int argc, char** argv) {
     netbridges::clear(a); netbridges::clear(c); ok &= netbridges::poolUsed() == 0;
     // the routing state's own sizes, so the memory this bought stays bought
     printf("  sizeof(netStruct)=%zu sizeof(pathStruct)=%zu sizeof(NetBridgePool)=%zu MAX_NODES=%d capacity=%d\n", sizeof(netStruct), sizeof(pathStruct), sizeof(NetBridgePool), MAX_NODES, netbridges::capacity());
-    // ARM: enums are 1 byte and pointers 4 -> pathStruct 40, netStruct 104.
-    // The host build pays 4-byte enums and 8-byte pointers on top of that.
+#if defined(OG_JUMPERLESS)
+    // ARM: enums are 1 byte and pointers 4 -> pathStruct 40, netStruct 108
+    // (104 + the 16-bit pool links, aligned). The host build pays 4-byte enums and
+    // 8-byte pointers on top of that. The V5 keeps its wider original types.
     ok &= sizeof(pathStruct) <= 40 + 4 * (sizeof(enum pathType) - 1)
-       && sizeof(netStruct) <= 104 + 4 * (sizeof(void*) - 4)
-       && netbridges::capacity() >= 2 * MAX_BRIDGES;
+       && sizeof(netStruct) <= 112 + 4 * (sizeof(void*) - 4);
+#endif
+    ok &= netbridges::capacity() >= 2 * MAX_BRIDGES;
     printf("  %s\n", ok ? "PASS" : "FAIL"); fails += !ok;
   }
 #endif
@@ -477,11 +478,7 @@ int main(int argc, char** argv) {
     };
     auto netOf = [&](int node) { for (int i = 1; i < MAX_NETS; i++) { netStruct& n = globalState.connections.nets[i]; if (n.number == 0) continue; for (int k = 0; k < MAX_NODES && n.nodes[k] != 0; k++) if (n.nodes[k] == node) return i; } return -1; };
     // two separate user nets + one GND net: 5 bridges live in the pool
-#if defined(OG_JUMPERLESS)
     auto pool = [] { return netbridges::poolUsed(); };
-#else
-    auto pool = [] { int n = 0; for (int i = 1; i < MAX_NETS; i++) if (globalState.connections.nets[i].number) n += netbridges::count(globalState.connections.nets[i]); return n; };   // V5: no pool, count the inline tables
-#endif
     setup({{1,2},{2,3},{10,11},{GND,20},{GND,21}});
     ok &= pool() == 5;
     int nA = netOf(1), nB = netOf(10); ok &= nA > 5 && nB > 5 && nA != nB && netOf(20) == 1;

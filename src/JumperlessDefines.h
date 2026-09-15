@@ -239,7 +239,7 @@ extern int probeRev;
 #define MAX_NODES 64 //this is the max number of nodes that can be connected to a net
 #else
 #define MAX_BRIDGES 128
-#define MAX_NODES 40 //this is the max number of nodes that can be connected to a net
+#define MAX_NODES 64 //this is the max number of nodes that can be connected to a net (was 40: rows 41-60 of a GND net were dropped)
 #endif
 
 // Storage types for the routing state. The OG narrows them (every value

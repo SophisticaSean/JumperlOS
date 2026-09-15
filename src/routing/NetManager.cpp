@@ -834,15 +834,9 @@ void addBridgeToNet(uint16_t netToAddBridge, int16_t node1,
     // MAX_BRIDGES can do. Either way the bridge is listed but NOT routed.
     Serial.print("net ");
     Serial.print(netToAddBridge);
-#if defined(OG_JUMPERLESS)
     Serial.print(": bridge pool full (");
     Serial.print(netbridges::capacity());
     Serial.println(" entries) - connection listed but NOT routed");
-#else
-    Serial.print(" bridge table full (MAX_NODES=");
-    Serial.print(MAX_NODES);
-    Serial.println(") - connection listed but NOT routed");
-#endif
     return;
   }
   }

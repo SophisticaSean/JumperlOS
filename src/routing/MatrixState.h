@@ -20,11 +20,7 @@ jl_netNode_t nodes[MAX_NODES]; // member nodes in insertion order, 0 = empty slo
 // The net's bridges as (node1, node2) pairs, in insertion order. Access ONLY
 // through netbridges:: (routing/NetBridges.h): on V5 this is the inline
 // table, on the OG it is a {head, tail, count} into the shared pool.
-#if defined(OG_JUMPERLESS)
-NetBridgeList bridges;
-#else
-int16_t bridges[MAX_NODES][2]; //either store them here or in one long array that references the net
-#endif
+NetBridgeList bridges;   // {head, tail, count} into the shared pool (routing/NetBridges.h)
 
 int16_t specialFunction; // store #defined number for that special function -1 for regular net
 
@@ -55,13 +51,12 @@ uint8_t termColor; //terminal color index for 255 color mode (default is white)
 
 // netbridges:: bodies (declared in NetBridges.h, need the complete netStruct).
 namespace netbridges {
-#if defined(OG_JUMPERLESS)
 inline Iter begin(const netStruct& n) { return Iter{n.bridges.head}; }
 inline int count(const netStruct& n) { return n.bridges.count; }
 inline bool append(netStruct& n, int16_t node1, int16_t node2) {
   NetBridgePool& p = netBridgePool;
   if (!p.initialised) resetAll();
-  uint8_t e = p.freeHead;
+  netbridge_link_t e = p.freeHead;
   if (e == 0) return false;  // pool full: the caller reports it
   p.freeHead = p.entries[e].next;
   p.used++;
@@ -77,9 +72,9 @@ inline void detach(netStruct& n) { n.bridges.head = 0; n.bridges.tail = 0; n.bri
 inline void clear(netStruct& n) {
   NetBridgePool& p = netBridgePool;
   if (p.initialised) {
-    uint8_t e = n.bridges.head;
+    netbridge_link_t e = n.bridges.head;
     while (e != 0) {
-      uint8_t nx = p.entries[e].next;
+      netbridge_link_t nx = p.entries[e].next;
       p.entries[e].next = p.freeHead;
       p.freeHead = e;
       if (p.used) p.used--;
@@ -88,25 +83,6 @@ inline void clear(netStruct& n) {
   }
   detach(n);
 }
-#else
-inline Iter begin(const netStruct& n) { return Iter{n.bridges, 0}; }
-inline int count(const netStruct& n) { int k = 0; while (k < MAX_NODES && n.bridges[k][0] != 0) k++; return k; }
-inline bool append(netStruct& n, int16_t node1, int16_t node2) {
-  int k = count(n);
-  if (k >= MAX_NODES) return false;
-  n.bridges[k][0] = node1;
-  n.bridges[k][1] = node2;
-  return true;
-}
-inline void clear(netStruct& n) {
-  for (int k = 0; k < MAX_NODES; k++) {
-    if (n.bridges[k][0] == 0) break;
-    n.bridges[k][0] = 0;
-    n.bridges[k][1] = 0;
-  }
-}
-inline void detach(netStruct& n) { clear(n); }
-#endif
 } // namespace netbridges
 
 // NOTE: net[] now accessed via globalState.connections.nets[]

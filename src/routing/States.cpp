@@ -70,11 +70,9 @@ String booleanToString(bool value);
 
 // Global singleton - THE single source of truth for all Jumperless state
 JumperlessState globalState;
-#if defined(OG_JUMPERLESS)
 // The shared per-net bridge pool (routing/NetBridges.h); belongs to
 // globalState.connections, kept outside it so the header stays Arduino-free.
 NetBridgePool netBridgePool;
-#endif
 
 // Set custom net name - stored by NET NUMBER in DisplayState
 // Pass empty string or nullptr to clear

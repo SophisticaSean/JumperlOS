@@ -36,17 +36,18 @@
 #include <string.h>
 #include "JumperlessDefines.h"
 
-#if defined(OG_JUMPERLESS)
-
+// Both boards use the pool (the OG since 0c581fd, the V5 since the 40-node
+// per-net cap turned out to be what dropped rows 41-60 of a GND net there).
 #define NET_BRIDGE_POOL_SIZE (2 * MAX_BRIDGES)  // entries; index 0 is the null link
-static_assert(NET_BRIDGE_POOL_SIZE + 1 <= 255, "pool links are uint8_t");
+typedef uint16_t netbridge_link_t;               // 145 entries on the OG, 257 on the V5
+static_assert(NET_BRIDGE_POOL_SIZE + 1 <= 65535, "pool links are uint16_t");
 
 // The per-net header. Lives at netStruct.bridges so the positional aggregate
 // initialisers ({{}} in specialFunctionNetsInit / initNets / clearAllNTCC)
 // zero it like they zeroed the old table.
 struct NetBridgeList {
-  uint8_t head;   // pool index of the first entry, 0 = empty
-  uint8_t tail;   // pool index of the last entry (valid when head != 0)
+  netbridge_link_t head;   // pool index of the first entry, 0 = empty
+  netbridge_link_t tail;   // pool index of the last entry (valid when head != 0)
   uint8_t count;
 };
 
@@ -54,11 +55,11 @@ struct NetBridgePool {
   struct Entry {
     int16_t node1;
     int16_t node2;
-    uint8_t next;   // 0 = end of list / end of free list
+    netbridge_link_t next;   // 0 = end of list / end of free list
   };
   Entry entries[NET_BRIDGE_POOL_SIZE + 1];  // [0] is never used (null index)
-  uint8_t freeHead;
-  uint8_t used;
+  netbridge_link_t freeHead;
+  uint16_t used;
   bool initialised;
 };
 
@@ -67,17 +68,15 @@ struct NetBridgePool {
 // header stays Arduino-free and the host test can define its own.
 extern NetBridgePool netBridgePool;
 
-#endif // OG_JUMPERLESS
+
 
 struct netStruct;
 
 namespace netbridges {
 
-#if defined(OG_JUMPERLESS)
-
 inline void resetAll() {
   NetBridgePool& p = netBridgePool;
-  for (int i = 1; i < NET_BRIDGE_POOL_SIZE; i++) p.entries[i].next = (uint8_t)(i + 1);
+  for (int i = 1; i < NET_BRIDGE_POOL_SIZE; i++) p.entries[i].next = (netbridge_link_t)(i + 1);
   p.entries[NET_BRIDGE_POOL_SIZE].next = 0;
   p.entries[0].next = 0;
   p.freeHead = 1;
@@ -89,7 +88,7 @@ inline int capacity() { return NET_BRIDGE_POOL_SIZE; }
 inline int poolUsed() { return netBridgePool.used; }
 
 struct Iter {
-  uint8_t idx;
+  netbridge_link_t idx;
   bool valid() const { return idx != 0; }
   void next() { idx = netBridgePool.entries[idx].next; }
   int16_t node1() const { return netBridgePool.entries[idx].node1; }
@@ -103,28 +102,6 @@ inline bool append(netStruct& n, int16_t node1, int16_t node2);
 inline void clear(netStruct& n);
 inline void detach(netStruct& n);
 
-#else // V5: the inline table
-
-inline void resetAll() {}
-inline int capacity() { return MAX_NODES; }
-inline int poolUsed() { return 0; }
-
-struct Iter {
-  const int16_t (*table)[2];
-  int k;
-  bool valid() const { return k < MAX_NODES && table[k][0] != 0; }
-  void next() { k++; }
-  int16_t node1() const { return table[k][0]; }
-  int16_t node2() const { return table[k][1]; }
-};
-
-inline Iter begin(const netStruct& n);
-inline int count(const netStruct& n);
-inline bool append(netStruct& n, int16_t node1, int16_t node2);
-inline void clear(netStruct& n);
-inline void detach(netStruct& n);
-
-#endif
 
 } // namespace netbridges
 
