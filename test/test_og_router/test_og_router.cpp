@@ -357,6 +357,24 @@ int main(int argc, char** argv) {
   // swapDuplicateNode's L-chip arm: 5V and ADC1 in SEPARATE nets used to
   // short through J Y0 ("ADC1 shorted to 5V").
   fails += !runCase("Lsw: {5V,8} + {ADC1,12} (separate nets, L-chip swap)", {{6, {SUP_B, 8}, {{SUP_B, 8}}}, {7, {ADC1, 12}, {{ADC1, 12}}}}, verbose);
+#if !defined(OG_JUMPERLESS)
+  // Nodes the V5 crossbar does not map at all (the OG's SUPPLY_3V3/5V,
+  // RP_GPIO_0, TOP_RAIL_GND): the router must leave them unrouted, never
+  // index a chip by -1 (the OG router had 14 such writes; the V5 had one
+  // read at xMapForNode). Expected-unrouted, never shorted.
+  {
+    auto unmapped = [&](const char* title, std::vector<NetDef> defs) {
+      int sh = 0, un = 0; runCaseQ(defs, sh, un);
+      bool ok = sh == 0;
+      printf("\n=== %s ===\n  unrouted=%d shorts=%d  %s\n", title, un, sh, ok ? "PASS (unmapped node left open)" : "FAIL");
+      return ok;
+    };
+    fails += !unmapped("U1: SUPPLY_3V3-5 (unmapped on V5)", {{6, {SUPPLY_3V3, 5}, {{SUPPLY_3V3, 5}}}});
+    fails += !unmapped("U2: SUPPLY_5V-8 + GND-9", {{6, {SUPPLY_5V, 8}, {{SUPPLY_5V, 8}}}, {1, {GND, 9}, {{GND, 9}}}});
+    fails += !unmapped("U3: RP_GPIO_0-12-13", {{6, {RP_GPIO_0, 12, 13}, {{RP_GPIO_0, 12}, {12, 13}}}});
+    fails += !unmapped("U4: TOP_RAIL_GND-20", {{6, {TOP_RAIL_GND, 20}, {{TOP_RAIL_GND, 20}}}});
+  }
+#endif
   // Case 3 (bug 3): a big GND net next to 3V3 on the same chip.
   { NetDef g{1, {GND}, {}}; for (int r = 4; r <= 11; r++) { g.nodes.push_back(r); g.bridges.push_back({GND, r}); }
     fails += !runCase("3: 3V3-3 + GND-4..11", {{6, {SUP_A, 3}, {{SUP_A, 3}}}, g}, verbose); }
