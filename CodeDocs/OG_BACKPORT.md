@@ -1363,7 +1363,7 @@ NetManager/States functions), behaviour identical. Expected MicroPython heap
 gain on the OG: the heap is carved from what `.bss` leaves, so roughly the
 same ~16.8 KB (the 5760 B experiment moved `gc.mem_free()` 1:1) - i.e. from
 ~18 000 to ~34 000 free after soft reset, or room to raise the configured
-heap rung. **Not yet measured on hardware.**
+heap rung. **Measured 2026-09-12 (opt/perf-round3): superseded by the 56 KB rung below.**
 
 **Proof** (`test/test_og_router/run.sh`): 20/20 (the 17 plus: GND-1..60 +
 probe = 61 paths routed; a 72-bridge/6-net netlist with 0 drops, 0 shorts;
@@ -1426,7 +1426,7 @@ cannot fit. Every boot now prints `[MP] GC heap: N KB (M KB C heap left)`
 on port 1 (OG; V5 prints only when the configured size does not fit, as
 before), so the rung taken is on record; `X` still shows the ledger.
 Expected `gc.mem_free()` after import: ~22 752 + 12 288 = ~35 000.
-**Not yet measured on hardware.**
+**Measured 2026-09-12: the 40 KB rung was taken; superseded by the section below.**
 
 **Deferred row-LED repaint (same branch): `refresh=False` / `leds_hold()` /
 `leds_flush()`.** Measured over USB, a connect that changes visible row LEDs
@@ -1687,6 +1687,36 @@ lines are a name lookup + memcpy per node (~2 us), the unrouted section
 one pass over paths[] per bridge (72 x 72 compares worst case) - well
 under 1 ms for a 24-bridge net and ~1 ms for 60, against the 51 ms the
 three Python loops cost. Harness 30/30, digest unchanged.
+
+### Session 2026-09-12 — perf round 3 (branch `opt/perf-round3`, 89472a1..7183cd3) — MEASURED on the rev 2
+
+Full plan and review history: jumperless-mcp `PERF_PLAN.md` / `PERF_VERIFICATION.md`.
+
+- **`connect_many(want="<id>:<p>,<p>;…")`** — the string form parsed in C
+  (`modules/jumperless/pair_str.h`, two-pass: validate everything, then edit;
+  `ValueError` leaves the netlist untouched). The MicroPython compiler costs
+  ~40 µs/byte on the RP2040: a 24-pair dict literal compiles in 6.8 ms, the
+  string in 2.3. MCP 24-bridge scale 23.6 → 17.0 ms, alternating 15.3 → 12.5.
+  Host test `test/test_pair_str/run.sh`.
+- **RAM: −18 984 B of true frees** (`__end__` 0x20027c74 → 0x2002324c,
+  `ram-report.sh` gate 0x20024000 met with 3 508 B spare): dead WaveGen DMA
+  ring + alignment pad, `slicedLines[130]`, UART response queue 8 → 4,
+  `MICROPY_PY_MATH_SPECIAL_FUNCTIONS` off (erff/lgammaf were 4.7 KB of
+  **.data** — arduino-pico links libm into RAM), Abramowitz-Stegun erf in
+  Debugs (−4.4 KB .data), MenuTransitions frames 300 → 112 px. The 2 KB RX
+  ring stays: an overflow witness is unprovable on rev 2 (RP_UART_TX/RX
+  crossbar nodes read floating), but `rx_dma_sync_head` now counts unmasked
+  (DMA transfer count) and `uart_stats()` / `uart_send()` exist for the day
+  it is.
+- **MicroPython heap 40 → 56 KB** (`MICROPY_HEAP_SIZE`), ladder now
+  {cfg, cfg−8K, 48, 40, …} so a short build lands one rung down, never on 32.
+  On the board: `[MP] GC heap: 56 KB (19.7 KB C heap left)`, pool 56 000,
+  `gc.mem_free()` 41 376 after the helper import. `c_heap_free()` added.
+- Probe (host side, jumperless-mcp): `dwell_ms` + a read-only pre-check,
+  6.58 → 3.92 s; settle stays 12 ms.
+- Host tests at 7183cd3: `test_og_router` 0 failing (1844 bridges, PathHealth
+  rule == own-path truth both ways), `test_og_analog` pass, `test_pair_str`
+  pass. V5 env builds (RAM 57.6 %, flash 16.5 %).
 
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
