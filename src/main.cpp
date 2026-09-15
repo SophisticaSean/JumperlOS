@@ -227,6 +227,9 @@ static inline void armStackLimit( uint32_t floorAddr ) {
 }
 #endif
 
+// Core-1 GPIO/ADC scan passes (readGPIO/readFakeGPIO ran), read by jumperless.slot_stats().
+volatile uint32_t coreOneScanPasses = 0;
+
 void setup( ) {
 #ifdef PICO_RP2350
     // Core 0 stack: SCRATCH_Y top (0x20082000) growing down; with Core 1 on
@@ -2066,6 +2069,7 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                     lastScannedRoutingGen = routingGeneration;
                     t[ 8 ] = micros( );
                     if ( !postRouteRepaint ) {
+                        coreOneScanPasses++;   // jumperless.slot_stats()[4]: proves the scans keep running after a route
                         readGPIO( );     // if want, I can make this update the LEDs like 10 times
                                          // faster by putting outside this loop,
                         readFakeGPIO( ); // Background reading for fake GPIO inputs with visual updates

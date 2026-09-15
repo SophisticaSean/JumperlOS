@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "States.h"
+#include "SlotSaveGate.h"
 #include "MatrixState.h"
 #include "NetManager.h"
 #include "FileParsing.h"
@@ -587,6 +588,7 @@ void JumperlessState::markDirty() {
         void* caller = __builtin_return_address(0);
         Serial.printf("  Caller address: %p\n", caller);
     }
+    if (!dirty) dirtySinceMs = millis();   // the clean->dirty edge, for the auto-save backstop
     dirty = true;
     lastModifiedTime = millis();
 }
@@ -597,6 +599,7 @@ void JumperlessState::clearDirty() {
                      millis(), millis() - lastModifiedTime);
     }
     dirty = false;
+    dirtySinceMs = 0;
 }
 
 // Connection management
@@ -4702,6 +4705,11 @@ void printStateBackupInfo(void) {
  * 
  * This enables live updates when host edits files while preventing corruption.
  */
+// Auto-save counters for jumperless.slot_stats(): total saves this boot and
+// how many of them the backstop (not the quiet window) let through.
+volatile uint32_t slotAutoSaveCount = 0;
+volatile uint32_t slotBackstopCount = 0;
+
 ServiceStatus SlotManager::service() {
     // return ServiceStatus::IDLE; //< this isn't the problem, not running slot manager service still freezes
     //return ServiceStatus::IDLE;
@@ -4865,11 +4873,14 @@ ServiceStatus SlotManager::service() {
     extern volatile bool refreshLocalInProgress;
     extern volatile bool core1busy;
 
-    // GATING NEW MODEL:
-    //   - Drop the old "2000ms since last mutation" debounce. The user's
-    //     window of unsaved work is now bounded by the cache flush gate
-    //     (systemIdleForFlush + 60s emergency backstop) instead of a
-    //     fixed timer.
+    // GATING MODEL:
+    //   - No "2000ms since last mutation" debounce. The save waits for a
+    //     quiet window (systemIdleForFlush, 750 ms since the last user
+    //     input - raw-REPL batches count) and, once the slot has been dirty
+    //     for SLOT_SAVE_BACKSTOP_MS, for the next service pass regardless
+    //     of input cadence (routing/SlotSaveGate.h). FileCache's 60 s
+    //     emergency backstop covers cache entries only - the slot is not in
+    //     the cache until this save serialises it, so it needs its own.
     //   - Defer toYAML + cache write to genuine idle. toYAML is ~ms of
     //     CPU work on Core 0; running it on every dirty tick during a
     //     probe burst is wasted effort because we'd just re-serialize
@@ -4892,8 +4903,12 @@ ServiceStatus SlotManager::service() {
             Serial.print(activeSlotPath);
             Serial.println(" is a project template and is not written back)");
         }
-    } else if (hasDirtyState && systemIdleForFlush() && !refreshLocalInProgress && !core1busy) {
+    } else if (hasDirtyState &&
+               systemIdleForFlush(slotSaveQuietMs(millis() - activeState.getDirtySince(), SLOT_SAVE_BACKSTOP_MS)) &&
+               !refreshLocalInProgress && !core1busy) {
             slowReason = "auto-save";
+            slotAutoSaveCount++;
+            if (millis() - activeState.getDirtySince() > SLOT_SAVE_BACKSTOP_MS) slotBackstopCount++;
             unsigned long saveStart = micros();
 
             if (debugWaitLoopTiming) {

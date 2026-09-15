@@ -159,6 +159,7 @@ namespace AsyncPassthrough {
      */
     void getUARTErrorStats(uint32_t* framing_errors, uint32_t* overruns, uint32_t* resyncs);
     void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total, int32_t* state);
+    uint32_t uartRxRingSize(void);   // bytes in the RX ring (2^UART_RX_RING_BITS)
     void uartSendBlocking(const uint8_t* data, size_t len);
     
     /**

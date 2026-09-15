@@ -112,6 +112,8 @@ int jl_state_path_flat( int pathIdx, int* out20 );
 int jl_get_num_bridges( void );
 int jl_c_heap_free( void );
 void jl_uart_stats( uint32_t* out8 );
+uint32_t jl_uart_ring_size( void );
+void jl_slot_stats( uint32_t* out5 );
 void jl_uart_send( const uint8_t* data, size_t len );
 int jl_get_max_bridges( void );
 void jl_leds_hold( void );
@@ -3341,6 +3343,25 @@ static mp_obj_t jl_uart_stats_func( void ) {
     return mp_obj_new_tuple( 8, items );
 }
 static MP_DEFINE_CONST_FUN_OBJ_0( jl_uart_stats_obj, jl_uart_stats_func );
+
+// uart_ring_size() -> bytes in the passthrough RX ring (2048 OG / 4096 V5).
+// Separate from uart_stats() so that tuple keeps its 8 fields.
+static mp_obj_t jl_uart_ring_size_func( void ) { return mp_obj_new_int_from_uint( jl_uart_ring_size( ) ); }
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_uart_ring_size_obj, jl_uart_ring_size_func );
+
+// slot_stats() -> (saves, backstop_saves, dirty, dirty_ms, scan_passes)
+static mp_obj_t jl_slot_stats_func( void ) {
+    uint32_t v[ 5 ];
+    jl_slot_stats( v );
+    mp_obj_t items[ 5 ];
+    items[ 0 ] = mp_obj_new_int_from_uint( v[ 0 ] );
+    items[ 1 ] = mp_obj_new_int_from_uint( v[ 1 ] );
+    items[ 2 ] = mp_obj_new_bool( v[ 2 ] != 0 );
+    items[ 3 ] = mp_obj_new_int_from_uint( v[ 3 ] );
+    items[ 4 ] = mp_obj_new_int_from_uint( v[ 4 ] );
+    return mp_obj_new_tuple( 5, items );
+}
+static MP_DEFINE_CONST_FUN_OBJ_0( jl_slot_stats_obj, jl_slot_stats_func );
 
 // uart_send(bytes) - blocking write to the passthrough UART hardware (test aid).
 static mp_obj_t jl_uart_send_func( mp_obj_t data ) {
@@ -7092,6 +7113,8 @@ static const mp_rom_map_elem_t jumperless_module_globals_table[] = {
     { MP_ROM_QSTR( MP_QSTR_get_num_bridges ), MP_ROM_PTR( &jl_get_num_bridges_obj ) },
     { MP_ROM_QSTR( MP_QSTR_c_heap_free ), MP_ROM_PTR( &jl_c_heap_free_obj ) },
     { MP_ROM_QSTR( MP_QSTR_uart_stats ), MP_ROM_PTR( &jl_uart_stats_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_uart_ring_size ), MP_ROM_PTR( &jl_uart_ring_size_obj ) },
+    { MP_ROM_QSTR( MP_QSTR_slot_stats ), MP_ROM_PTR( &jl_slot_stats_obj ) },
     { MP_ROM_QSTR( MP_QSTR_uart_send ), MP_ROM_PTR( &jl_uart_send_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_net_nodes ), MP_ROM_PTR( &jl_get_net_nodes_obj ) },
     { MP_ROM_QSTR( MP_QSTR_get_bridge ), MP_ROM_PTR( &jl_get_bridge_obj ) },

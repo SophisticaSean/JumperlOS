@@ -56,7 +56,7 @@ if [ "${1:-}" = ubsan ]; then
   exit 0
 fi
 
-for t in test_og_router test_og_analog test_pair_str test_rx_witness test_mp_rung; do
+for t in test_og_router test_og_analog test_pair_str test_rx_witness test_mp_rung test_slot_backstop test_qstr_table; do
   echo "== $t"
   out=$(bash "test/$t/run.sh") || { echo "$out" | tail -20; exit 1; }
   echo "$out" | tail -1

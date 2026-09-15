@@ -2643,6 +2643,8 @@ void getUARTErrorStats(uint32_t* framing_errors, uint32_t* overruns, uint32_t* r
 }
 
 // For MicroPython uart_stats(): the RX ring's overflow witness, unmasked.
+uint32_t uartRxRingSize(void) { return 1u << UART_RX_RING_BITS; }
+
 void getUARTRingStats(uint32_t* overflows, uint32_t* laps, uint32_t* tx_overflows, uint32_t* rx_total, int32_t* state) {
     rx_dma_sync_head();
     if (overflows) *overflows = uartReceivedOverflowCount;

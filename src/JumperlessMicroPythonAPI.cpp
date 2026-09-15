@@ -1064,6 +1064,21 @@ void jl_uart_stats( uint32_t* out8 ) {
 void jl_uart_send( const uint8_t* data, size_t len ) {
     AsyncPassthrough::uartSendBlocking( data, len );
 }
+uint32_t jl_uart_ring_size( void ) {
+    return AsyncPassthrough::uartRxRingSize( );
+}
+
+// slot_stats(): (saves, backstop_saves, dirty, dirty_ms, scan_passes) - the
+// slot auto-save's counters (routing/SlotSaveGate.h) and the core-1 GPIO/ADC
+// scan counter, for the hardware playbook.
+void jl_slot_stats( uint32_t* out5 ) {
+    extern volatile uint32_t slotAutoSaveCount, slotBackstopCount, coreOneScanPasses;
+    out5[ 0 ] = slotAutoSaveCount;
+    out5[ 1 ] = slotBackstopCount;
+    out5[ 2 ] = globalState.isDirty( ) ? 1u : 0u;   // SlotManager's activeState is a reference to globalState
+    out5[ 3 ] = globalState.isDirty( ) ? (uint32_t)( millis( ) - globalState.getDirtySince( ) ) : 0u;
+    out5[ 4 ] = coreOneScanPasses;
+}
 
 // Get nodes in a net as a comma-separated string (returns static buffer)
 const char* jl_get_net_nodes( int netNum ) {
