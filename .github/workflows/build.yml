@@ -1,0 +1,65 @@
+name: Build
+
+# Both firmware envs on every PR and on pushes to main / og-* branches, with
+# the OG RAM gate (ram-report.sh) and a size table for both ELFs in the job
+# summary. release.yml only compiles after a merge to main; this is what
+# tells a PR author the V5 still builds and the OG still fits its GC rung.
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'og-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [jumperless_og, jumperless_v5]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # lib/FatFS pulls SPIFTL from a submodule
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Size table
+        run: |
+          B=~/.platformio/packages/toolchain-rp2040-earlephilhower/bin
+          { echo '### ${{ matrix.env }} size'; echo '```'; "$B/arm-none-eabi-size" -A .pio/build/${{ matrix.env }}/firmware.elf | grep -E '^\.(text|data|bss|heap)|^Total'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: OG RAM gate
+        if: matrix.env == 'jumperless_og'
+        # Upstream CI warns above the 56 KB rung gate and fails only at the
+        # 40 KB rung floor; the fork's own CI holds the 56 KB gate hard.
+        env:
+          RAM_GATE: ${{ github.repository == 'SophisticaSean/JumperlOS' && 'hard' || 'warn' }}
+        run: sh ram-report.sh | tee -a "$GITHUB_STEP_SUMMARY"
