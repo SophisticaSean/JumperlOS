@@ -477,8 +477,15 @@ void *jl_mp_commit_exec(void *buf, size_t len);
 #define MODULE_JUMPERLESS_ENABLED   (1)
 
 // Board name for sys.platform
+// os.uname().machine is "<board> with <mcu>": truthful per build so a host
+// can tell the boards apart (the driver keys its playbooks on it).
+#if defined(OG_JUMPERLESS)
+#define MICROPY_HW_BOARD_NAME "jumperless-og"
+#define MICROPY_HW_MCU_NAME   "rp2040"
+#else
 #define MICROPY_HW_BOARD_NAME "jumperless-v5"
 #define MICROPY_HW_MCU_NAME   "rp2350b"
+#endif
 
 // Surface the Jumperless firmware version in the REPL banner's machine field
 // (the segment after "; ") and in sys.implementation._machine, so external
