@@ -1,0 +1,15 @@
+name: Host tests
+
+# The OG router / analog / pair_str / RX-witness harnesses compile the real
+# source against shims on the runner - seconds, no toolchain, no board.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: test/host_tests.sh

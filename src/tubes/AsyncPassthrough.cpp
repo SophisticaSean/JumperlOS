@@ -40,6 +40,7 @@
 #define DEBUG_RELAYED_COMMANDS 0
 
 #include "AsyncPassthrough.h"
+#include "RxWitness.h"
 #include "class/cdc/cdc_device.h"
 #include "CommandBuffer.h"  // New simplified command buffer system
 #if ASYNC_PASSTHROUGH_ENABLED == 1
@@ -493,6 +494,7 @@ static uint8_t s_last_usb_to_uart_len = 0;  // number of valid bytes
 // landing on the same masked address) reads as its remainder - the witness
 // can undercount extreme laps, but it can no longer miss every one.
 static volatile uint32_t s_rx_dma_last_total = 0;   // bytes the DMA had written at the last sync (unmasked)
+static volatile uint32_t s_rx_dma_last_wa = 0;      // RP2350 witness: write_addr at the last sync
 static volatile uint32_t uartReceivedLapCount = 0;  // whole ring laps the consumer missed
 
 // Refresh uartReceivedHead from the live RX-DMA write pointer. The DMA writes
@@ -504,19 +506,21 @@ static inline void rx_dma_sync_head( void ) {
         setupRxDma();
         return;
     }
-    // Overflow witness, UNMASKED: the transfer count started at 0xFFFFFFFF
-    // and decrements once per byte, so (0xFFFFFFFF - remaining) is the total
-    // ever written; the delta since the last sync cannot alias to zero on a
-    // whole lap the way a ring-masked address delta did.
     uint32_t wa = dma_hw->ch[ s_rx_dma_chan ].write_addr;
+#if defined( OG_JUMPERLESS )
+    // RP2040: TRANS_COUNT is a plain 32-bit down-counter (no MODE bits), so
+    // (0xFFFFFFFF - remaining) is the total ever written and the delta since
+    // the last sync is UNMASKED - a whole lap cannot alias to zero.
     uint32_t total = 0xFFFFFFFFu - dma_hw->ch[ s_rx_dma_chan ].transfer_count;
-    uint32_t arrived = total - s_rx_dma_last_total;
-    s_rx_dma_last_total = total;
+#else
+    // RP2350: 0xFFFFFFFF arms ENDLESS mode and the count never moves (see the
+    // note above s_rx_dma_last_total), so the write pointer's masked delta is
+    // the only witness - it can undercount an exact whole-lap alias.
+    uint32_t total = rx_witness_total_rp2350( s_rx_dma_last_total, wa, (uint32_t*)&s_rx_dma_last_wa, UART_RECEIVED_MASK );
+#endif
     uint16_t freeBytes = (uint16_t)( ( uartReceivedTail - uartReceivedHead - 1 ) & UART_RECEIVED_MASK );
-    if ( arrived > freeBytes ) {
-        uartReceivedOverflowCount++;
-        uartReceivedLapCount += arrived / sizeof( uartReceived );
-    }
+    rx_witness_step( total, (uint32_t*)&s_rx_dma_last_total, freeBytes, sizeof( uartReceived ),
+                     &uartReceivedOverflowCount, &uartReceivedLapCount );
 
     uartReceivedHead =
         (uint16_t)( ( wa - (uint32_t)(uintptr_t)uartReceived ) & UART_RECEIVED_MASK );
@@ -620,6 +624,7 @@ static void setupRxDma( void ) {
     uartReceivedTail = 0;
     // reset the overflow witness's baseline: nothing written yet
     s_rx_dma_last_total = 0;
+    s_rx_dma_last_wa = (uint32_t)(uintptr_t)uartReceived;
     dma_channel_configure(
         s_rx_dma_chan, &c,
         uartReceived,                                          // write: ring (aligned)
