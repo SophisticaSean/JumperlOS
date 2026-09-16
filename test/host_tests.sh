@@ -45,7 +45,7 @@ sweep() {   # $1 = binary, $2 = og|v5|v5rs
   local bin=$1 board=$2 seed line shorts unrouted want
   for seed in 1 2 7; do
     want=$(eval "echo \$WANT_${board}_${seed}")
-    line=$("$bin" rand "$seed" 10000 | tail -1); echo "$line"
+    line=$("$bin" rand "$seed" 10000 | grep '^random sweep'); echo "$line"
     shorts=$(sed -E 's/.*, ([0-9]+) with SHORTS.*/\1/' <<<"$line")
     unrouted=$(sed -E 's/.*PathHealth: [0-9]+ bridges, ([0-9]+) unrouted.*/\1/' <<<"$line")
     [ "$shorts" -eq 0 ] || { echo "FAIL: seed $seed: $shorts trials shorted"; exit 1; }
@@ -84,5 +84,16 @@ out=$(BOARD=v5 ROUTE_SAFETY=1 BUILD_DIR="$TMP/test_og_router_rs" bash test/test_
 grep -q "RouteSafety: linked and initialised" <<<"$out" || { echo "FAIL: the RouteSafety leg did not initialise - it would be inert (validateAllPaths returns 0 without wireTableReady)"; exit 1; }
 echo "$out" | tail -1
 echo "== test_og_router sweeps (v5, RouteSafety linked)"
-sweep "$(sed -n 's/^binary: //p' <<<"$out")" v5rs
+RS_BIN=$(sed -n 's/^binary: //p' <<<"$out")
+sweep "$RS_BIN" v5rs
+# The differential gate for any validateAllPaths change: the same netlists
+# through the persistent accumulator and the old rebuild-per-path code, with
+# every other trial carrying a deliberately conflicting net so the REJECT
+# branch actually runs (the plain sweeps produce 0 shorts and never reach it).
+echo "== validateAllPaths: persistent vs rebuild (differential)"
+diffout=$("$RS_BIN" diff 1 2000) || { echo "$diffout" | tail -5; exit 1; }
+echo "$diffout" | tail -1
+grep -q "identical skip vectors" <<<"$diffout" || { echo "FAIL: the differential pass did not run"; exit 1; }
+rejected=$(sed -E 's/RouteSafety: ([0-9]+) paths rejected.*/\1/' <<<"$(echo "$diffout" | tail -1)")
+[ "${rejected:-0}" -ge 100 ] || { echo "FAIL: only $rejected rejects - the reject branch is not being exercised, so the comparison proves nothing"; exit 1; }
 echo "host tests: all pass"

@@ -85,6 +85,8 @@ Stream USBSer3; char* netNameConstants[MAX_NETS]; CurrentSenseOverlayState curre
 // SDK headers the shims exist to avoid)
 void initRouteSafety(void);
 int routeSafetySelfCheck(Stream* out);
+extern bool routeSafetyPersistent;   // false = the old rebuild-per-path implementation
+extern long routeSafetyFound;        // paths validateAllPaths has REJECTED, summed
 chipXYBitfield lastChipXY[12];
 int ch446q_timeout_count = 0;
 // Only the debug printers in RouteSafety's hardware half read these names.
@@ -323,9 +325,50 @@ static bool runCaseQ(std::vector<NetDef> defs, int& shorts, int& unrouted, int t
   fclose(tmp);
   return ok;
 }
+#if defined(HARNESS_ROUTE_SAFETY)
+// The sweeps cannot prove a RouteSafety change: they produce 0 shorts by the
+// harness's own crossbar model, so validateAllPaths' REJECT branch - the one a
+// persistent accumulator could corrupt - never runs in them. This drives the
+// same netlist through BOTH implementations and compares what each one skipped,
+// path by path. Deliberately conflicting nets (two driven sources in one net)
+// are what make the branch fire.
+static std::string skipVector() {
+  std::string v;
+  for (int i = 0; i < numberOfPaths; i++) {
+    const pathStruct& p = globalState.connections.paths[i];
+    char buf[48];
+    snprintf(buf, sizeof buf, "%d:%d:%d:%d;", (int)p.node1, (int)p.node2, (int)p.net, (int)p.skip ? 1 : 0);
+    v += buf;
+  }
+  return v;
+}
+
+static bool diffTrial(std::vector<NetDef> defs) {
+  int sh = 0, un = 0;
+  long f0 = routeSafetyFound;
+  routeSafetyPersistent = true;  runCaseQ(defs, sh, un); std::string a = skipVector();
+  long fPersistent = routeSafetyFound - f0;
+  f0 = routeSafetyFound;
+  routeSafetyPersistent = false; runCaseQ(defs, sh, un); std::string b = skipVector();
+  long fRebuild = routeSafetyFound - f0;
+  routeSafetyPersistent = true;
+  if (a == b && fPersistent == fRebuild) return true;
+  printf("  DIFF: persistent rejected %ld, rebuild %ld\n    persistent %s\n    rebuild    %s\n",
+         fPersistent, fRebuild, a.c_str(), b.c_str());
+  return false;
+}
+#endif
+
 int main(int argc, char** argv) {
 
   if (getenv("OG_ROUTER_DIGEST")) digest = true;
+#if defined(HARNESS_ROUTE_SAFETY)
+  // `diff <seed> <trials>`: the differential gate for a RouteSafety change.
+  bool diffMode = argc > 2 && std::string(argv[1]) == "diff";
+  if (diffMode) argv[1] = (char*)"rand";
+#else
+  const bool diffMode = false;
+#endif
   if (argc > 2 && std::string(argv[1]) == "rand") {
     unsigned seed = atoi(argv[2]); int n = argc > 3 ? atoi(argv[3]) : 200;
     // In-file xorshift32 so "seed 1" is the same sequence on glibc, macOS and
@@ -372,9 +415,24 @@ int main(int argc, char** argv) {
       if (argc > 6) { debugNTCC2 = true; runCase("replay", defs, true); return 0; }
       total++;
       int sh = 0, un = 0;
+#if defined(HARNESS_ROUTE_SAFETY)
+      if (diffMode) {
+        // Every other trial gets a deliberately conflicting net (two driven
+        // sources in one net), which is what makes validateAllPaths REJECT -
+        // the branch the plain sweeps never reach.
+        if ((t & 1) == 0) defs.push_back({11, {GND, TOP_RAIL, (t % 60) + 1}, {{GND, TOP_RAIL}, {TOP_RAIL, (t % 60) + 1}}});
+        if (!diffTrial(defs)) { printf("seed %u trial %d: the two implementations disagree\n", seed, t); return 1; }
+        total++;
+        continue;
+      }
+#endif
       if (!runCaseQ(defs, sh, un, t)) { fails++; if (sh) shortTrials++; if (argc > 4 && (sh || argc > 5)) { printf("seed %u trial %d FAILED:", seed, t); for (auto& d : defs) { printf(" net%d{", d.number); for (int x : d.nodes) printf("%s ", nodeName(x).c_str()); printf("}"); } printf("\n"); } }
     }
     printf("random sweep seed=%u: %d/%d trials failed, %d with SHORTS; PathHealth: %ld bridges, %ld unrouted, rule == own-path truth both ways\n", seed, fails, total, shortTrials, healthBridges, healthUnrouted);
+#if defined(HARNESS_ROUTE_SAFETY)
+    printf("RouteSafety: %ld paths rejected over the sweep%s\n", routeSafetyFound,
+           diffMode ? " (both implementations, identical skip vectors)" : "");
+#endif
     return 0;
   }
   bool verbose = argc > 1; debugNTCC = verbose; debugNTCC2 = verbose;

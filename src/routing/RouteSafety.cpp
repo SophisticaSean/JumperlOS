@@ -408,7 +408,27 @@ struct FakeGpioPartners {
     }
 };
 
-int validateAllPaths(void) {
+// validateAllPaths, two ways. The accumulator `accepted[]` only ever GROWS, so
+// the union-find can be built once and each candidate's <= 4 hops united into
+// it - instead of reset(numWires) + unionFromBitfield (<= 1 536 bit tests) per
+// path. Measured on a V5 at 30 GND rows: validation was 13 477 us of a
+// 20 461 us bridgesToPaths (66%), the largest phase by far.
+//
+// A rejected path must leave NO trace, and that is the whole subtlety: find()
+// path-compresses (parent[a] = parent[parent[a]]) and componentHasShort calls
+// find() for EVERY wire after the candidate's hops are united, so wires all
+// over the merged component end up pointing at the surviving root. A two-word
+// undo of (parent[b], sz[a]) would leave them there - silently, and it can
+// both hide a real short and invent one. So the snapshot is the whole state:
+// two int16_t[288] = 1 152 B memcpy'd before the union and restored only on
+// reject, which is bit-identical by construction and still deletes the
+// per-path rebuild.
+//
+// `persistent` is false in the differential host test (ROUTE_SAFETY_DIFFTEST),
+// which drives both implementations over the same path sets and compares the
+// `found` count and the whole p.skip vector, trial by trial - the sweeps alone
+// cannot do that job: they produce 0 shorts, so the reject branch never runs.
+static int validateAllPathsImpl(bool persistent) {
     if (!wireTableReady) return 0;
 
     chipXYBitfield accepted[12];
@@ -417,6 +437,10 @@ int validateAllPaths(void) {
 
     FakeGpioPartners fakeGpio;
     fakeGpio.collect();
+
+    WireUF live;               // the persistent accumulator
+    WireUF snapshot;           // its state before the candidate's hops
+    if (persistent) live.reset(numWires);
 
     for (int i = 0; i < numberOfPaths; i++) {
         pathStruct& p = globalState.connections.paths[i];
@@ -436,13 +460,24 @@ int validateAllPaths(void) {
         }
         if (nHops == 0) continue;
 
-        WireUF uf;
-        uf.reset(numWires);
-        unionFromBitfield(uf, accepted);
-        unionHops(uf, hc, hx, hy, nHops);
+        WireUF rebuilt;
+        if (persistent) {
+            memcpy(snapshot.parent, live.parent, numWires * sizeof(live.parent[0]));
+            memcpy(snapshot.sz, live.sz, numWires * sizeof(live.sz[0]));
+            unionHops(live, hc, hx, hy, nHops);
+        } else {
+            rebuilt.reset(numWires);
+            unionFromBitfield(rebuilt, accepted);
+            unionHops(rebuilt, hc, hx, hy, nHops);
+        }
+        WireUF& uf = persistent ? live : rebuilt;
 
         int netA = -1, netB = -1;
         if (componentHasShort(uf, &netA, &netB)) {
+            if (persistent) {   // the candidate leaves no trace, path compression included
+                memcpy(live.parent, snapshot.parent, numWires * sizeof(live.parent[0]));
+                memcpy(live.sz, snapshot.sz, numWires * sizeof(live.sz[0]));
+            }
             p.skip = true;
             if (numberOfUnconnectablePaths < 10) {
                 unconnectablePaths[numberOfUnconnectablePaths][0] = p.node1;
@@ -477,6 +512,21 @@ int validateAllPaths(void) {
     }
     return found;
 }
+
+#ifdef ROUTE_SAFETY_DIFFTEST
+// Host differential test only (the router harness defines this): route the same
+// netlist twice, once each way, and compare the p.skip vectors. routeSafetyFound
+// makes the reject branch's coverage visible instead of assumed.
+bool routeSafetyPersistent = true;
+long routeSafetyFound = 0;
+int validateAllPaths(void) {
+    int n = validateAllPathsImpl(routeSafetyPersistent);
+    routeSafetyFound += n;
+    return n;
+}
+#else
+int validateAllPaths(void) { return validateAllPathsImpl(true); }
+#endif
 
 // ============================================================================
 // Suspect / generation

@@ -24,7 +24,7 @@ rm -rf "$BUILD"; mkdir -p "$BUILD"   # a stale object/binary here has flipped a 
 if [ "$BOARD" = v5 ]; then
   NTCC=${NTCC_SRC:-src/routing/NetsToChipConnections.cpp}; DEF=""; BOARDCPP=src/boards/v5/board_v5.cpp
   if [ "${ROUTE_SAFETY:-0}" = 1 ]; then
-    DEF="-DHARNESS_ROUTE_SAFETY"; RS="$BUILD/RouteSafety.cpp"
+    DEF="-DHARNESS_ROUTE_SAFETY -DROUTE_SAFETY_DIFFTEST"; RS="$BUILD/RouteSafety.cpp"
   fi
 else
   NTCC=${NTCC_SRC:-src/routing/NetsToChipConnections_OG.cpp}; DEF="-DOG_JUMPERLESS"; BOARDCPP=src/boards/og/board_og.cpp
