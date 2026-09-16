@@ -45,6 +45,17 @@ jobs:
           restore-keys: |
             pio-${{ runner.os }}-
 
+      - name: No build artifact is tracked
+        # release.yml / dev-firmware.yml assert "firmware.uf2 only exists if
+        # this build produced it" - true only while nothing under .pio is in
+        # git. actions/checkout would restore a tracked blob and the guard
+        # would pass on a stale 4 MB artifact (it did on upstream main).
+        run: |
+          if git ls-files --error-unmatch .pio/build/${{ matrix.env }}/firmware.uf2 >/dev/null 2>&1; then
+            echo "::error::.pio/build/${{ matrix.env }}/firmware.uf2 is tracked again - release.yml would ship a stale UF2"
+            exit 1
+          fi
+
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
