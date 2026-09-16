@@ -1,0 +1,36 @@
+name: Host tests
+
+# The router harness compiles the REAL router and NetManager against shims on
+# the runner - seconds, no toolchain, no board. macOS proves the no-gawk /
+# no-glibc claim (BSD sed/awk, libc-free sweep generator); the ubsan leg runs
+# both routers with the sanitizers and recovery off - that is the leg that
+# catches a chipStates[-1].
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: host-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, leg: gcc }
+          - { os: macos-latest,  leg: gcc }
+          - { os: ubuntu-latest, leg: ubsan }
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.leg == 'gcc'
+        run: test/host_tests.sh
+      - if: matrix.leg == 'ubsan'
+        run: CXX=clang++ test/host_tests.sh ubsan
