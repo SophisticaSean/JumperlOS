@@ -14,7 +14,7 @@ cd "$(dirname "$0")/../.."
 # through the same harness). Per-board build dirs so the two never race.
 BOARD=${BOARD:-og}
 BUILD=${BUILD_DIR:-${RUNNER_TEMP:-/tmp}/test_og_router}/$BOARD
-mkdir -p "$BUILD"
+rm -rf "$BUILD"; mkdir -p "$BUILD"   # a stale object/binary here has flipped a leg green-to-red before
 if [ "$BOARD" = v5 ]; then
   NTCC=${NTCC_SRC:-src/routing/NetsToChipConnections.cpp}; DEF=""; BOARDCPP=src/boards/v5/board_v5.cpp
 else
