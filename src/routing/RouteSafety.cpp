@@ -272,9 +272,12 @@ static bool componentHasShort(WireUF& uf, int* outNetA = nullptr,
     int16_t* rootNet = rootNetBuf[core];
     int16_t (*rootNodes)[8] = rootNodesBuf[core];
     uint8_t* rootNodeCount = rootNodeCountBuf[core];
-    memset(rootDriven, 0xFF, sizeof(rootDrivenBuf[0]));
-    memset(rootNet, 0xFF, sizeof(rootNetBuf[0]));
-    memset(rootNodeCount, 0, sizeof(rootNodeCountBuf[0]));
+    // Only the first numWires entries are ever read (the loop below bounds on
+    // it), and numWires is ~100-200 against kMaxWires 288: clearing the whole
+    // buffer was 1 440 B per path, per call.
+    memset(rootDriven, 0xFF, numWires * sizeof(rootDriven[0]));
+    memset(rootNet, 0xFF, numWires * sizeof(rootNet[0]));
+    memset(rootNodeCount, 0, numWires * sizeof(rootNodeCount[0]));
 
     for (int w = 0; w < numWires; w++) {
         int node = wireNode[w];
@@ -377,17 +380,33 @@ bool wouldShortCrosspointMasked(int chip, int x, int y, int clearChip,
     return componentHasShort(uf);
 }
 
-static bool isFakeGpioInputPath(int pathIdx) {
-    int pathNode1 = globalState.connections.paths[pathIdx].node1;
-    int pathNode2 = globalState.connections.paths[pathIdx].node2;
-    for (int b = 0; b < globalState.connections.numBridges; b++) {
-        int b1 = globalState.connections.bridges[b][0];
-        int b2 = globalState.connections.bridges[b][1];
-        if ((b1 == pathNode1 || b1 == pathNode2) && IS_FAKE_GP_IN(b2)) return true;
-        if ((b2 == pathNode1 || b2 == pathNode2) && IS_FAKE_GP_IN(b1)) return true;
+// The nodes that share a bridge with a FAKE_GP_IN node. Collected ONCE per
+// validateAllPaths instead of rescanning the whole bridge table per path -
+// that scan was O(paths x bridges) (~15 000 iterations at 60 rows) and ran
+// before any union-find work.
+struct FakeGpioPartners {
+    // One entry per bridge is the exact bound (a FAKE_GP_IN node can be
+    // bridged more than once, so MAX_FAKE_GP_IN is not).
+    int16_t node[MAX_BRIDGES];
+    int n = 0;
+
+    void collect() {
+        n = 0;
+        for (int b = 0; b < globalState.connections.numBridges && b < MAX_BRIDGES; b++) {
+            int b1 = globalState.connections.bridges[b][0];
+            int b2 = globalState.connections.bridges[b][1];
+            if (IS_FAKE_GP_IN(b2)) node[n++] = (int16_t)b1;
+            else if (IS_FAKE_GP_IN(b1)) node[n++] = (int16_t)b2;
+        }
     }
-    return false;
-}
+
+    bool covers(int node1, int node2) const {
+        for (int i = 0; i < n; i++) {
+            if (node[i] == node1 || node[i] == node2) return true;
+        }
+        return false;
+    }
+};
 
 int validateAllPaths(void) {
     if (!wireTableReady) return 0;
@@ -396,12 +415,15 @@ int validateAllPaths(void) {
     memset(accepted, 0, sizeof(accepted));
     int found = 0;
 
+    FakeGpioPartners fakeGpio;
+    fakeGpio.collect();
+
     for (int i = 0; i < numberOfPaths; i++) {
         pathStruct& p = globalState.connections.paths[i];
         if (p.skip || p.net <= 0) continue;
         if (p.pathType == VIRTUAL) continue;
         // TDM manages these; simultaneous presence in paths[] is intentional.
-        if (isFakeGpioInputPath(i)) continue;
+        if (fakeGpio.n > 0 && fakeGpio.covers(p.node1, p.node2)) continue;
 
         int8_t hc[4], hx[4], hy[4];
         int nHops = 0;
