@@ -7326,6 +7326,7 @@ void swapNodes(int pathIndex) {
 
 int xMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;   // a node this board does not map asks with chip -1 (same guard as the OG router)
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip].xMap[i] == node) {
       nodeFound = i;
@@ -7346,6 +7347,7 @@ int xMapForNode(int node, int chip) {
 
 int yMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;   // a node this board does not map asks with chip -1 (same guard as the OG router)
   for (int i = 1; i < 8; i++) {
     if (globalState.connections.chipStates[chip].yMap[i] == node) {
       nodeFound = i;
@@ -7357,6 +7359,7 @@ int yMapForNode(int node, int chip) {
 
 int xMapForChipLane0(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       nodeFound = i;
@@ -7367,6 +7370,7 @@ int xMapForChipLane0(int chip1, int chip2) {
 }
 int xMapForChipLane1(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 15; i++) {   // i+1 below: 15 is the last valid pair start
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       if (globalState.connections.chipStates[chip1].xMap[i + 1] == chip2) {
