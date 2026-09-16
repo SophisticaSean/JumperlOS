@@ -76,7 +76,27 @@ int blockProbeButton = 0; unsigned long blockProbeButtonTimer = 0;
 static int hrStore = -1, hnStore = -1; int& highlightedRow = hrStore; int& highlightedNet = hnStore;
 Stream USBSer3; char* netNameConstants[MAX_NETS]; CurrentSenseOverlayState currentSenseOverlayState;
 #if !defined(OG_JUMPERLESS)
+#if defined(HARNESS_ROUTE_SAFETY)
+// ROUTE_SAFETY=1: the real routing/RouteSafety.cpp is linked, so it brings its
+// own routingGeneration and validateAllPaths; these are what IT needs from the
+// hardware half.
+#include "CH446Q.h"   // the shim: chipXYBitfield + the raw-send no-op
+// (not RouteSafety.h: it includes the real States.h, which pulls in the pico
+// SDK headers the shims exist to avoid)
+void initRouteSafety(void);
+int routeSafetySelfCheck(Stream* out);
+chipXYBitfield lastChipXY[12];
+int ch446q_timeout_count = 0;
+// Only the debug printers in RouteSafety's hardware half read these names.
+const char* const connectionNamesX[12][16] = {};
+// MatrixState.cpp is not linked (the harness lifts `nano` out of it), and its
+// doNotIntersect table is empty on a board with no user rules, so the honest
+// stub is "no forbidden pairs" - the driven-source and two-net rules are what
+// these cases exercise.
+bool connectionAllowed(int, int) { return true; }
+#else
 volatile uint32_t routingGeneration = 0; int validateAllPaths(void) { return 0; }   // RouteSafety.cpp is not linked on the V5 leg
+#endif
 #endif
 static bool digest = false;   // print the closed crosspoints per case/trial (compare two builds)
 static std::string lastDigest; // the closed crosspoints of the last runCase
@@ -158,12 +178,35 @@ static std::string yName_(int c, int y) {
   return "node_" + nodeName(t);
 }
 struct NetDef { int number; std::vector<int> nodes; std::vector<std::pair<int,int>> bridges; };
+
+#if defined(HARNESS_ROUTE_SAFETY)
+// A linked-but-uninitialised RouteSafety is INERT: validateAllPaths opens with
+// `if (!wireTableReady) return 0`, and wireTableReady is only set at the end of
+// initRouteSafety() - which reads chipStates[].xMap/yMap, so it must run AFTER
+// the maps above are filled (a leg that skipped it would reproduce the stubbed
+// numbers exactly and be read as "linking changed nothing"). Once is enough:
+// the tables are the same every case.
+static void routeSafetyInit() {
+  static bool done = false;
+  if (done) return;
+  initRouteSafety();
+  if (routeSafetySelfCheck(&Serial) != 0) {
+    printf("RouteSafety self-check FAILED - the leg would be inert\n");
+    exit(1);
+  }
+  printf("RouteSafety: linked and initialised (self-check passed)\n");
+  done = true;
+}
+#else
+static void routeSafetyInit() {}
+#endif
 static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   printf("\n=== %s ===\n", title);
   memset(&globalState, 0, sizeof(globalState));
   for (int i = 0; i < 12; i++) for (int j = 0; j < 16; j++) globalState.connections.chipStates[i].xMap[j] = B.xMap[i][j];
   for (int i = 0; i < 12; i++) for (int j = 0; j < 8; j++) globalState.connections.chipStates[i].yMap[j] = B.yMap[i][j];
   for (int i = 0; i < 12; i++) { globalState.connections.chipStates[i].chipNumber = i; globalState.connections.chipStates[i].chipChar = 'A' + i; }
+  routeSafetyInit();
   clearAllNTCC(); // firmware order: clear, then NetManager fills nets, then bridgesToPaths
   // base nets 1..5 like initNets: GND, TOP_RAIL, BOTTOM_RAIL, DAC0, DAC1
   const int baseNode[6] = {0, GND, TOP_RAIL, BOTTOM_RAIL, DAC0, DAC1};
@@ -200,6 +243,10 @@ static bool runCase(const char* title, std::vector<NetDef> defs, bool verbose) {
   int maxNet = 5; for (auto& d : defs) if (d.number > maxNet) maxNet = d.number;
   for (int i = 6; i <= maxNet; i++) if (globalState.connections.nets[i].number == 0) globalState.connections.nets[i].number = i;
   if (verbose) { for (int j=1;j<8;j++){ printf("  net[%d] number=%d bridges=%d\n", j, globalState.connections.nets[j].number, netbridges::count(globalState.connections.nets[j])); } }
+  // The firmware rebuilds this on every refresh; RouteSafety reads it to tell
+  // "two nets in one component" from "one net, two nodes" (netOfNode), so a
+  // stale index makes every path look like a short.
+  buildNodeToNetIndex();
   bridgesToPaths();
   if (verbose) printf("  numberOfPaths=%d\n", (int)numberOfPaths);
   for (int c = 0; c < 12; c++) for (int j = 0; j < 16; j++) if (globalState.connections.chipStates[c].xMap[j] != B.xMap[c][j]) printf("  CORRUPT: chip %c xMap[%d] = %d (expected %d)\n", 'A'+c, j, globalState.connections.chipStates[c].xMap[j], B.xMap[c][j]);
@@ -277,6 +324,7 @@ static bool runCaseQ(std::vector<NetDef> defs, int& shorts, int& unrouted, int t
   return ok;
 }
 int main(int argc, char** argv) {
+
   if (getenv("OG_ROUTER_DIGEST")) digest = true;
   if (argc > 2 && std::string(argv[1]) == "rand") {
     unsigned seed = atoi(argv[2]); int n = argc > 3 ? atoi(argv[3]) : 200;

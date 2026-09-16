@@ -34,8 +34,14 @@ TMP=${RUNNER_TEMP:-/tmp}
 # ships bash 3, no associative arrays)
 WANT_og_1=7429 WANT_og_2=7347 WANT_og_7=7671
 WANT_v5_1=1752 WANT_v5_2=1607 WANT_v5_7=1664
+# The same V5 router with the REAL routing/RouteSafety.cpp linked (ROUTE_SAFETY=1):
+# validateAllPaths sets p.skip on a path it calls a short, so it CHANGES routing
+# output - 47/65/54 more unrouted bridges than the stubbed leg. Recorded
+# 2026-09-16 with no behaviour change of its own, so a later RouteSafety
+# optimisation must leave these EXACTLY where they are.
+WANT_v5rs_1=1799 WANT_v5rs_2=1672 WANT_v5rs_7=1718
 
-sweep() {   # $1 = binary, $2 = og|v5
+sweep() {   # $1 = binary, $2 = og|v5|v5rs
   local bin=$1 board=$2 seed line shorts unrouted want
   for seed in 1 2 7; do
     want=$(eval "echo \$WANT_${board}_${seed}")
@@ -73,4 +79,10 @@ echo "== test_og_router sweeps (og)"
 sweep "$OG_BIN" og
 echo "== test_og_router sweeps (v5)"
 sweep "$V5_BIN" v5
+echo "== test_og_router (v5 leg, RouteSafety linked)"
+out=$(BOARD=v5 ROUTE_SAFETY=1 BUILD_DIR="$TMP/test_og_router_rs" bash test/test_og_router/run.sh) || { echo "$out" | tail -20; exit 1; }
+grep -q "RouteSafety: linked and initialised" <<<"$out" || { echo "FAIL: the RouteSafety leg did not initialise - it would be inert (validateAllPaths returns 0 without wireTableReady)"; exit 1; }
+echo "$out" | tail -1
+echo "== test_og_router sweeps (v5, RouteSafety linked)"
+sweep "$(sed -n 's/^binary: //p' <<<"$out")" v5rs
 echo "host tests: all pass"

@@ -15,12 +15,23 @@ cd "$(dirname "$0")/../.."
 BOARD=${BOARD:-og}
 BUILD=${BUILD_DIR:-${RUNNER_TEMP:-/tmp}/test_og_router}/$BOARD
 rm -rf "$BUILD"; mkdir -p "$BUILD"   # a stale object/binary here has flipped a leg green-to-red before
+# ROUTE_SAFETY=1 (v5 only) links the REAL routing/RouteSafety.cpp instead of the
+# stub in the harness, so validateAllPaths() runs for real: it sets p.skip on a
+# path it calls a short, which CHANGES routing output. The harness asserts
+# initRouteSafety() + routeSafetySelfCheck() first - a linked-but-uninitialised
+# RouteSafety returns 0 from `if (!wireTableReady) return 0` and would silently
+# reproduce the stubbed numbers.
 if [ "$BOARD" = v5 ]; then
   NTCC=${NTCC_SRC:-src/routing/NetsToChipConnections.cpp}; DEF=""; BOARDCPP=src/boards/v5/board_v5.cpp
+  if [ "${ROUTE_SAFETY:-0}" = 1 ]; then
+    DEF="-DHARNESS_ROUTE_SAFETY"; RS="$BUILD/RouteSafety.cpp"
+  fi
 else
   NTCC=${NTCC_SRC:-src/routing/NetsToChipConnections_OG.cpp}; DEF="-DOG_JUMPERLESS"; BOARDCPP=src/boards/og/board_og.cpp
 fi
 cp "$NTCC" "$BUILD/NetsToChipConnections_OG.cpp"
+# RouteSafety, like the router, is copied so its quote-includes hit the shims.
+[ -n "${RS:-}" ] && cp src/routing/RouteSafety.cpp "$BUILD/RouteSafety.cpp"
 # The real NetManager.cpp is linked (its quote-includes must resolve to the
 # shims, so it is copied beside the router); the shim dir carries no
 # NetManager.h on purpose - the real one is what the harness compiles against.
@@ -46,7 +57,7 @@ awk '/^struct nanoStatus nano = \{/{p=1} p{print} p&&/^  \};/{exit}' src/routing
 # diff the outputs of the old and new tree: identical = identical routing.
 ${CXX:-g++} -std=gnu++17 ${CXXFLAGS:--Os} $DEF \
     -Itest/test_og_router/shim -I"$BUILD" -Isrc -Isrc/routing \
-    "$BUILD/NetsToChipConnections_OG.cpp" "$BUILD/NetManager.cpp" src/boards/board.cpp "$BOARDCPP" \
+    "$BUILD/NetsToChipConnections_OG.cpp" "$BUILD/NetManager.cpp" src/boards/board.cpp "$BOARDCPP" ${RS:-} \
     test/test_og_router/test_og_router.cpp -o "$BUILD/test_og_router"
 echo "binary: $BUILD/test_og_router"
 "$BUILD/test_og_router" "$@"
