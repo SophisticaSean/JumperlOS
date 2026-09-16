@@ -61,7 +61,7 @@ static const char* jumperless_functions[] = {
     // GPIO pin ownership
     "gpio_claim_pin", "gpio_release_pin", "gpio_release_all_pins",
     // Node connections
-    "connect", "disconnect", "fast_connect", "fast_disconnect", "is_connected", "nodes_clear", "node",
+    "connect", "disconnect", "fast_connect", "fast_disconnect", "connect_many", "get_netlist", "get_path_flat", "leds_hold", "leds_flush", "leds_held", "is_connected", "nodes_clear", "node",
     "nodes_save", "nodes_discard", "nodes_has_changes", "switch_slot",
     // Net information API
     "get_net_name", "set_net_name", "get_net_color", "get_net_color_name", "set_net_color", "set_net_color_hsv",

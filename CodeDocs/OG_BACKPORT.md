@@ -1214,10 +1214,518 @@ publishing a fake pick, setting `debugProbing`, driving an indicator flag.
 Injecting a button press still works the same way: write 2 to
 `ProbeButton::getInstance()::inst + 0x5c`.
 
+### Session 2026-09-11 — corner rows / dense nets: the OG router dropped what it had routed
+
+Measured on a rev 2 board running 1.7.11.1: `connect(1,"3V3")` reported the
+net but row 1 floated; with `{3V3,5,1}` and `{GND,28,30}` loaded only the
+corner routed first was live; `3V3` on row 3 next to `GND` on rows 4-11 left
+row 3 unrouted. `NetsToChipConnections_OG.cpp` found every one of those paths
+and then threw them away. Six defects, all in that file:
+
+1. **`resolveUncommittedHops(allowStacking=2)` was virgin-only.** The
+   deferred `-2` slots it fills are the second half of a bounce the OG
+   commit/alt branches had ALREADY stamped for the net (the hop chip's Y0 → L
+   lane, or a same-chip X shared by positions 0 and 2). `freeOrSameNetX/Y`
+   accept a same-net lane only when `allowStacking == 1`; `commitPaths()`
+   maps 2 → 1, the resolver did not, so it refused the net's own reservation,
+   `restoreRoutingState()` tore the path down and `couldntFindPath` reported
+   it. This alone was bugs 1-3 above. (V5 is unaffected: its bounce node is
+   never pre-stamped.)
+2. **`commitPaths()` "BB → chip L" branch ran for SF chips too** (`chip[0] !=
+   CHIP_L` instead of `< 8`), writing `ch[CHIP_L].yStatus[8|9]`, i.e. past
+   `yStatus[8]` into `xMap[0]`. `GND` (net 1) to a corner through chip I left
+   `xMap[L][0] = 1 = TOP_1`, so every later lookup of row 1 on L returned X0
+   (ISENSE_MINUS) — for the rest of the boot, since `chipStates` is filled
+   once. That is the "only one corner at a time" symptom. 1.3.22 has the same
+   overflow (its `xMap` is `int8_t`).
+3. **`Lchip` was 0xFF, not false, on every fresh path.** `clearAllNTCC()`
+   memsets `paths[]` to -1 and re-zeroes `altPathNeeded`/`skip` but not the
+   OG-only `bool Lchip`. At `-Os` gcc compiles `Lchip == true` as "byte !=
+   0", so on the firmware EVERY BBtoSF alt path took the chip-L hop branch
+   (a -O0 host build hides this; the test builds at -Os for that reason).
+4. **Stale `Lchip` after `swapDuplicateNode()`** (5V: L X14 ↔ J X14, ADC0:
+   L X2 ↔ I X13, ...): the retry ran the L-hop logic against chip I/J and
+   closed that chip's Y0 — seen as ADC1 shorted to 5V through J Y0.
+5. **`freeLane == 1` arm of the Lchip alt path stamped `x[1] = xMapL1c1`**
+   (the hop lane index) instead of the SF node's pin on L, closing whatever L
+   pin that index was (GND to GPIO_0 through BOTTOM_30 in the sweep). Same
+   typo in 1.3.22 `NetsToChipConnections.cpp`.
+6. **`L.Y[c]` and `c.Y0` are one wire but were tracked as two.** An L↔L
+   same-chip path bouncing on L Y2 and a BB path bouncing on C Y0 shorted.
+   `freeOrSameNetY` / `setChipYStatusSafe` now check and reserve both ends.
+
+Plus three `xStatus[-1]` index guards (one was a write) that UBSan flagged.
+
+**Ground truth is the schematic, not 1.3.22.** Stock 1.3.22 mishandles the
+corners on the same board (its path table silently drops `3V3-1`, and every
+corner attempt through chip A ends with `x3 = -1`); its `Lchip` branches carry
+defects 2 and 5 verbatim, so they were repaired here, not ported. The wiring
+the test models was read out of
+`Hardware/KiCAD/Jumperless Rev 3/JumperlessRev3ForPathfinding.kicad_sch`
+(labels on the CH446Q pins): chip A..H Y0 = `AL`..`HL` = chip L Y0..Y7, one
+wire each; L X8/X9/X10/X11 = rows 1/30/32(b1)/61(b30); A X0/X1/X9 = `AI`/`AJ`/
+`AK` = I/J/K Y0; BB lanes pair lane0<->lane0 (A X2 `AB0` <-> B X0 `AB0`). That
+matches `board_og.cpp` exactly, so the descriptor tables were never the bug.
+
+**Bench-verified by Kevin's coordinator (2026-09-11): four corner LEDs lit at
+once, 3V3-to-row-3 beside GND on 4-11 / 24-31 / all other 59 rows.**
+
+Follow-up, same day: a GND net on rows 1..24 read floating on EVERY row when
+probed with `fast_connect("ADC0", r)`. Not the router - `netStruct` is
+`nodes[MAX_NODES]` + `bridges[MAX_NODES][2]` and OG `MAX_NODES` was 24
+(`JumperlessDefines.h`), so GND-1..24 filled the per-net bridge table exactly
+and the probe bridge, added last, was dropped by `addBridgeToNet()` (message
+on Serial only). Raising it to 40 (V5's value, +5.8 KB .bss) was tried and REVERTED: the
+MicroPython heap is carved from what .bss leaves, `gc.mem_free()` fell
+~18000 -> 10784 and on-board scripts died with MemoryError. So 24 stays, both
+"net full (MAX_NODES=24)" messages now print unconditionally, and a net must
+keep under 24 bridges (probe a big net from a row that is already in it, or
+split it). Kept from the same pass: the router's L-hop search accepts a hop
+chip whose SF lane / Y0 already carry the SAME net (GND could not reach a
+corner once its rows owned the I/J lanes of A..D).
+
+**Test:** `test/test_og_router/run.sh` — host build of the real router against
+a crossbar model of the rev 2 wiring; it checks the CLOSED CROSSPOINTS, not
+the path table. 8/11 fixed cases failed before, 11/11 pass after; a 6000-net
+random sweep went from ~33 % unrouted / ~4 % SHORTED to ~7 % unrouted / 0
+shorted. **Not bench-tested: the fixed UF2 has not been flashed to a board.**
+
+### Session 2026-09-11 (2) — the routing state shrinks, the per-net bridge cap goes (branch `opt/og-routing-memory`)
+
+Every byte of static routing state is a byte of MicroPython heap on the OG
+(the 24-node cap above was the symptom). Audit of the 117bb11 `jumperless_og`
+ELF (`arm-none-eabi-nm --size-sort`, struct layouts from a `-g` probe TU built
+with the firmware's exact flags): RAM 178000 B = `.data` 50464 + `.bss` 127536.
+
+| static consumer | bytes | what it is |
+|---|---|---|
+| code in `.data` (RAM) | ~50 000 | pico-sdk default: libm/libgcc/`mem*` + every `__not_in_flash_func` (LED renderers, ADC) - **not touched**, flash-write safety |
+| `globalState` | 32 496 | `ConnectionState` 24 256 (`nets[60]` 11 760, `paths[72]` 9 216, dead `chipXY[12]` 1 536, `chipStates` 1 008) + `DisplayState` 5 288 + `PartsState` 2 496 |
+| `mp_state_ctx` | 9 160 | MicroPython |
+| `singleCharCommands`, `CommandBuffer`, UART queues | 2.6 K / 2.6 K / 2 K x3 | serial |
+| routing tables in `.data` | ~4 600 | `rev4minusXmap`/`rev5plusXmap` (768 each), `connectionNamesX/Y` (1 152), `sfMappings` (800), `globalDoNotIntersects` (480), `def*ToChar*` (672) - initialised, never written, so RAM only for want of `const` |
+| OG router scratch | ~1 500 | `pathsWithCandidates`, `fillUnusedPaths` statics, `fakeGpioInput*` - `int` arrays of bytes-sized values |
+| `NetManager::newBridge` | 864 | `int[72][3]` mirror of `bridges[][3]` (int16) - left alone |
+| `nano` | 748 | mostly const tables + 4 mutable status arrays in one struct - left alone |
+
+The five findings: (1) **holds** - `netStruct.bridges[24][2]` was 96 B x 60 =
+5 760 B, 1 440 slots for 72 bridges; (2) **holds in spirit, not as a bitmap** -
+node ids are 1..199 so a byte is exact, but `nodes[]` is an insertion-ordered
+list at 168 sites (`nodes[0]` is the "first node" that colour/name
+reconciliation keys on), so a bitmap would change observable ordering; the
+byte-wide list lets `MAX_NODES` go 24 -> 64 for less RAM than 24 cost;
+(3) **holds** - `pathStruct` was 128 B (30 `int`s), now 40 B; (4) **already
+resolved** - `JumperlessState` is non-copyable and the five copies are gone
+(`States.h`), nothing copies `ConnectionState` either; the one whole-state
+`memset` is `ConnectionState::clear`; (5) see the table - the largest lever
+left is the ~50 KB of code in RAM, which is a flash-safety design decision,
+not routing state.
+
+**What changed** (`src/routing/NetBridges.h` is new; everything OG-only is
+behind `OG_JUMPERLESS` typedefs in `JumperlessDefines.h`, V5's types are
+unchanged):
+- `pathStruct`: `chip/x/y/candidates/net/altPathNeeded/duplicate` ->
+  `int8_t`, `node1/node2` -> `int16_t` (`BOUNCE_NODE` is 199). All signed, so
+  `clearAllNTCC`'s `memset(-1)` still reads back as -1 everywhere.
+- `netStruct`: `nodes[]`/`doNotIntersectNodes[]` -> `uint8_t` (0 = empty,
+  the only writer is `addNodeToNet`, which now also refuses an id > 255
+  instead of truncating it), `priority`/`numberOfDuplicates` -> `int8_t`,
+  and `bridges[MAX_NODES][2]` -> a 3-byte `{head, tail, count}` into ONE
+  shared pool of `2*MAX_BRIDGES` = 144 entries (6 B each, 874 B total,
+  `netBridgePool` next to `globalState` in `States.cpp`). The per-net BRIDGE
+  cap is gone: a net can carry all 72 bridges (a bridge between two special
+  nets is listed under both, and a merge appends before it frees, hence 2x).
+  `NetManager`, both routers and the harness go through `netbridges::`
+  (`begin/valid/next`, `append`, `count`, `clear`, `detach`, `resetAll`); on
+  V5 the same API wraps the inline table. Lifecycle: `resetAll()` in
+  `initNets()` and `ConnectionState::clear()`; `shiftNets` frees the deleted
+  net BEFORE the struct-copy shift and `detach`es the vacated last slot
+  (its header now belongs to the net below). Iteration order is insertion
+  order on both boards; a merged net keeps A's bridges before B's.
+- `MAX_NODES` on the OG: 24 -> 64 (GND + all 60 rows + 3). `netStruct` is
+  196 -> 104 B *including* that; `Graphics.cpp`'s four `MAX_NODES` stack
+  arrays are a byte wide on the OG so core 1's frame does not grow.
+- Dead `ConnectionState::chipXY[12]` removed (both boards, 1 536 B; only a
+  `memset` ever touched it). The seven `.data` tables above are `const`
+  (both boards; the compiler proves nobody writes them).
+- OG router scratch statics narrowed to `int8_t`/`int16_t`.
+- `FileParsing.cpp`: the legacy special-functions parser bound `toInt(int&)`
+  to `path.node1/2`; it goes through an `int` now, keeping toInt's
+  leave-unchanged-on-failure contract.
+
+**Numbers** (`pio run -e jumperless_og`, clean): RAM **178000 -> 161192 B
+(-16808, 67.9 % -> 61.5 %)**; `.bss` 127536 -> 113720 (-13816), `.data`
+50464 -> 47472 (-2992); `globalState` 32496 -> 19104 (+874 pool);
+`ConnectionState` 24256 -> 10864. Flash +1248 B. V5: RAM 320228 -> 315628
+(-4600: the const tables and the dead member), 52 of 8227 functions change
+size (address materialisation after the 1.5 KB layout shift plus the touched
+NetManager/States functions), behaviour identical. Expected MicroPython heap
+gain on the OG: the heap is carved from what `.bss` leaves, so roughly the
+same ~16.8 KB (the 5760 B experiment moved `gc.mem_free()` 1:1) - i.e. from
+~18 000 to ~34 000 free after soft reset, or room to raise the configured
+heap rung. **Measured 2026-09-12 (opt/perf-round3): superseded by the 56 KB rung below.**
+
+**Proof** (`test/test_og_router/run.sh`): 20/20 (the 17 plus: GND-1..60 +
+probe = 61 paths routed; a 72-bridge/6-net netlist with 0 drops, 0 shorts;
+the pool's append/merge-order/clear/detach/exhaustion unit case). The same
+harness built against 117bb11 with the new `OG_ROUTER_DIGEST=1` mode: the
+closed crosspoints are **byte-identical for 10 000 random trials (5 seeds x
+2000) and every fixed case except the three where 117bb11 dropped bridges at
+the 24 cap** (the new tree routes 25/41/61 paths there). clang
+`-fsanitize=undefined,implicit-conversion,integer` over all of it: zero
+truncation/conversion reports in either tree; both trees show the same five
+pre-existing `xStatus[-1]` reads (NetsToChipConnections_OG.cpp ~3699/3701/
+3766/4388/4491 - the byte before `xStatus` is `chipChar`; fixing them can
+change a routing decision, so left for a router pass).
+
+**Deliberately not done**: `nodes[]` as a bitmap (ordering, above);
+`DisplayState` (5.3 KB: `colorName[32]`/`name[32]` x 60 x 2 - user-visible
+name lengths, not routing); `PartsState`; `nano` split; `newBridge` (int16
+would save 432 B but it is shared V5 code with a header-visible type); the
+RAM-resident code; `chipStatus` (96 B for a positional-init hazard).
+**Risks**: the pool lifecycle rests on the three `NetManager` sites above
+being the only per-net writers (they are, per grep, and the sweep-era
+out-of-bounds table scans are gone with the API); anything that ever writes
+a node id into `nodes[]` other than `addNodeToNet` would need the same range
+guard; `MAX_NODES=64` grows `JsonState.cpp`'s `int nodes[MAX_NODES]` stack
+frame by 160 B (core 0).
+
+**Bench (coordinator, 0c581fd on the rev 2 board):** GND + all 60 rows +
+3 Nano pins = 64 nodes routes completely, the 65th is dropped as designed,
+corners fine, playbook and LED choreography pass. `gc.mem_free()` went
+18784 -> 22752, NOT +16.8 KB: the GC heap is a fixed rung allocation, not
+"whatever .bss leaves" - `mpAllocHeap` (`Python_Proper.cpp`) walks
+`{MICROPY_HEAP_SIZE, 64, 48, 32, 24, 16} KB` and takes the first rung that
+leaves `caps.mpCHeapReserveKb` (12 on the OG) of C heap. The OG's
+`MICROPY_HEAP_SIZE` is 28 KB (`JumperlessDefines.h`); before this branch the
+28 KB rung did not fit and the ladder landed on 24 KB, now it does (+4 KB
+= what the bench saw). The freed ~16.8 KB sits in the C heap; raising
+`MICROPY_HEAP_SIZE` (OG) is the knob that would hand it to Python -
+deliberately not touched here.
+
+**Follow-up (same branch):** `get_all_paths()` returned ~15 of 60 dicts on
+the OG with no sign of it - `jl_get_all_path_info` wrote into a 1 KB scratch
+and stopped its loop at size-256 (V5's 4 KB stops near ~75 paths too). The
+wrapper (`modules/jumperless/modjumperless.c`) now builds the list from
+`get_path_info(i)` for `i < get_num_paths(False)` - the same index range and
+line format, one 512 B static line at a time, no scratch - and the C
+function and its heap block are gone. Same fixed-buffer pattern still
+truncates silently elsewhere: `fs_read()` returns at most 1023 bytes on the
+OG (4095 on V5; `open()`/`read()` for more), `fs_listdir()` omits entries
+past its 768 B static buffer; `overlay_serialize()`'s 256 B is enough for
+the OG's single overlay slot.
+
+**Heap handed to Python (same branch):** OG `MICROPY_HEAP_SIZE` 28 -> 40 KB
+(`JumperlessDefines.h`). Sized from this build's linker map: the `.heap`
+region is 99 276 B; boot allocations are ~43.2 KB (2026-09-08: an 83 408 B
+region had 40 248 B free at the ladder; the 0c581fd bench, where 28 KB
+newly fit, agrees), so ~56 KB is free at `mpAllocHeap` and 40 + 12 KB
+reserve = 52 KB fits with ~4 KB margin, leaving the C heap the same ~16 KB
+that ran config saves + slot autosaves on 2026-09-08. 48 KB (60 KB needed)
+cannot fit. Every boot now prints `[MP] GC heap: N KB (M KB C heap left)`
+on port 1 (OG; V5 prints only when the configured size does not fit, as
+before), so the rung taken is on record; `X` still shows the ledger.
+Expected `gc.mem_free()` after import: ~22 752 + 12 288 = ~35 000.
+**Measured 2026-09-12: the 40 KB rung was taken; superseded by the section below.**
+
+**Deferred row-LED repaint (same branch): `refresh=False` / `leds_hold()` /
+`leds_flush()`.** Measured over USB, a connect that changes visible row LEDs
+cost ~85 ms against ~5 ms of on-board work. Reading the path: neither
+`connect()` (`refreshLocalConnections(1,1,0)`) nor `fast_connect()`
+(`fastRefresh`) waits for a LED paint - both post the crosspoint send
+(`REQ_BYPASS`) and return, and the nets show is async. The pacing is
+indirect: core 1 serves a posted send only at the top of `loop1`, so a send
+posted while core 1 is inside its nets render (`showNets` + `readGPIO` +
+`readFakeGPIO` + measurements + `leds.show`, one pass per scheduler tick)
+waits for that render, and the NEXT call's head wait (`while (core2busy ||
+!allIdle())`) then waits for the send. Option (c) exactly: while
+`ledRepaintHeld` (`Commands.cpp`) is up, core 1's LED branch skips the nets
+render (`main.cpp` loop1: the request stays posted, a menu/graphics flush
+still runs), so a send is served on the next pass; nothing became
+asynchronous and the mailbox handshake is untouched. `ledsFlush()` drops the
+hold and posts one clear-first nets show (`requestLedShow(-1)`).
+- API (`modules/jumperless/modjumperless.c`, both boards): `connect(a, b,
+  duplicates=-1, *, refresh=True)`, `disconnect(a, b, *, refresh=True)`,
+  `fast_connect(a, b, duplicates=-1, *, refresh=True)`, `fast_disconnect(a,
+  b, *, refresh=True)`, `leds_hold()`, `leds_flush() -> generation`,
+  `leds_held() -> bool`. Five qstrs hand-added to
+  `qstrdefs.generated.h` (hash + sort verified per Building_Native_Module.md).
+- Guarantees on return, either `refresh`: netlist updated + re-routed on
+  core 0; the crosspoint send is POSTED to core 1 and completes on its next
+  free pass; the next connect/disconnect/refresh waits for it at its head, so
+  calls never interleave on the crossbar (this is what fast_connect always
+  did - the send was never awaited). `refresh=True`: a repaint is posted
+  (connect) or left to core 1's periodic render (fast_connect), and any hold
+  is released with one show. `refresh=False`: LEDs held, strip keeps its last
+  frame until `leds_flush()` / the next `refresh=True` call. `connect(...,
+  refresh=False)` runs the same rebuild with `ledShowOption` 0 - the send is
+  identical (`JumperlessMicroPythonAPI.cpp` jl_nodes_*).
+- Caveats: a script that forgets `leds_flush()` leaves the strip stale
+  (also the logo swirl and the probe/GPIO LED feedback the nets render
+  carries); MicroPython teardown (`jl_bridge_free_scratches`) flushes a
+  forgotten hold, and any `refresh=True` call does too. A terminal `+`
+  during a script's hold rebuilds and routes but does not paint until the
+  flush. `leds_flush()` is asynchronous like every show.
+- Proof: harness case 8 - one rebuild per call (the way `fast_connect`
+  rebuilds) closes the same crosspoints as one rebuild of the whole batch,
+  so a hold that touched routing would fail it; 21/21 on the host. The hold
+  itself cannot run on the host (no core 1). **Timing NOT measured here**
+  (no board): measure `time.ticks_diff` around 30 back-to-back
+  `fast_connect(..., refresh=True)` vs `refresh=False` + one `leds_flush()`;
+  `PROFILE_FAST_REFRESH 1` in `Commands.cpp` prints the head wait
+  ("wait for Core 2") per call, which is where the render pacing shows.
+
+### Session 2026-09-11 (3) — the OG special-function nodes on a **rev 2** board (branch `opt/og-routing-memory`)
+
+The 09-08 parity batch was measured on a **rev 3.1** PCB. Sean's board is a
+**rev 2** (`Hardware/KiCAD/Jumperless Rev 2`), and the two carry different
+analog parts; the reference firmware (1.3.22 `initDAC`) tells them apart at
+boot by probing I2C0 for the rev 2 DAC. Bench symptoms on rev 2 with 0709af4
+(MicroPython, `adc_get(0)` routed to each node): DAC0/DAC1 read GND after
+`dac_set`; `get_ina_current(0)` a constant 0.0 with `get_bus_voltage(0)` a
+constant 0.86; `adc_get(1)`/`adc_get(2)` a constant **9.28**; `SUPPLY_5V`
+indistinguishable from floating; `fast_connect(8, "TOP_RAIL")` silently
+connected nothing.
+
+**Rev 2 hardware, from the PCB netlist (pad nets of `Jumperless2.kicad_pcb`):**
+- DACs: **two MCP4725** single-channel I2C DACs on I2C0 (GPIO 4/5), VDD = +5 V
+  as their reference. U3 at **0x60** (A0 = GND) = DAC0 -> L272 unity follower
+  (U10 amp 1: +in pin 13, out 3 = -in 14) -> the DAC-side INA219's 2 ohm
+  shunt -> chip I X12 / chip L X7. U5 at **0x61** (A0 = +5V) = DAC1 -> L272
+  amp 2 (+in 12, -in 11, out 5 = `DAC_+-8V` on J X12 / L X6), a non-inverting
+  stage with feedback R16 47k + R20 68k and the ground leg R15 47k + R13 21k
+  returned to **+5 V**, so `Vout = 5 * (2.691 * code/4095 - 1.691)`: 0 V at
+  code **2573** (USB-voltage independent), 13.45 V per 4096 codes, code 0 =
+  -8.5 V nominal (past the -8 V rail), code 4095 = +5.0 V. The reference's
+  rev 2 DAC1 numbers (`dac1_8V(18.0)`, offset 1932 + 150) are not a voltage
+  map; these are design values - **unverified on the bench**.
+- INA219s: U4 at **0x40** (A1 = A0 = GND), IN+ = `CURR_SENSE+` = chip L X1
+  (`ISENSE_PLUS`), IN- = `CURR_SENSE-` = L X0 (`ISENSE_MINUS`), R1 2 ohm
+  across; U6 at 0x41 across the DAC0 output path. Same as rev 3.1.
+- ADC0-2: crossbar -> LM324 U7 unity (+/-9 V) -> 1k/2k divider (R6/R21 ...)
+  -> LM324 U11 unity (+/-8 V) -> GPIO 26/27/28: 5 V in = 3.33 V at the pin,
+  i.e. the reference's `raw * 5.0 / 4095`. ADC3: U7 -> R17 68k into the
+  R14 21k (+3V3) / R19 47k (GND) node -> U11 -> GPIO 29; the reference's
+  measured `raw * 16/4010 - 8.1` (= `raw * 16.34/4095 - 8.1`, -8.1..+8.24 V)
+  is kept - the schematic's nominal values give ~18.8 V/4096 with 0 V near
+  raw 2330, so **a GND / 3V3 / 5V point on ADC3 decides which** for a given
+  board.
+- Supplies on the crossbar: +3V3 on chip I X14 (`I1.1`), +5V on chip J X14
+  and L X14 (`J6.1`, `L1.1`), GND on I/J X15. `TOP_RAIL` / `BOTTOM_RAIL` are
+  fed ONLY by the DP3T supply switch SW2 (+8V / +5V / +3V3 top, -8V / +5V /
+  +3V3 bottom) - not on any CH446Q pin. The reference's chip L X8-X11 are the
+  corner rows TOP_1/TOP_30/BOTTOM_1/BOTTOM_30, not rails.
+
+**Root causes (file:line at 0709af4):**
+1. DACs read GND: `src/Peripherals.cpp:393-409` + `initDAC` 476-503 drove an
+   MCP4822 over SPI0 unconditionally on `caps.spiDac`; rev 2 has no SPI DAC,
+   the words went to CS/SCK/MOSI with nothing listening, and the two MCP4725s
+   stayed at their power-on 0 V. Fixed: `initDAC` probes I2C0 for 0x61 AND
+   0x60 like the reference; found -> `OG_DAC_MCP4725_I2C` (fast-mode 2-byte
+   writes, set-once), else the MCP4822 path as before. Boot prints
+   `OG DAC: 2x MCP4725 (I2C, rev 2) - DAC0 0.00..5.00 V, DAC1 -6.5..5.0 V`.
+2. `adc_get(1)/(2)` = 9.28 constant: `src/remembering/PersistentStuff.cpp:437-457`
+   `readSettingsFromConfig()` copies the config `[calibration]` block - whose
+   defaults are the V5's (`config.h:277-291`: adc zero 9.0, spread 18.28) -
+   over `adcSpread/adcZero` and `dacSpread/dacZero` on EVERY config reload or
+   save (`configManager.cpp` 920/1122/1285/1316/1637/2128/2296), i.e. after
+   `initADC()`'s descriptor copy. A floating buffered input then reads
+   `4095 * 18.28/4095 - 9.0 = 9.28`, and a DAC ask went to code
+   `V*4095/21.5 + 1650`. The 09-08 ADC fix only held until the first save.
+   Fixed: on the OG `readSettingsFromConfig()` calls
+   `ogApplyBoardCalibration()` (board constants, `og_analog.h`) and the config
+   calibration keys are inert; `$` was already refused on the OG.
+3. INA219 constant 0.0 / 0.86: no code fault found. 0x40 answers (0.86 V is a
+   real bus-voltage register read of a floating IN-, value 215 << 3), the
+   calibration register is written (`initINA219` 1101), and the host harness
+   routes `3V3-I+ ; I- -row ; GND-row` (case P2). `ina_get_current()` returns
+   **amps**: a crossbar loop is ~4 crosspoints each way (~65-100 ohm each), so
+   3V3 -> LED -> GND is ~2-3 mA = `0.0025`. A bus voltage that never leaves
+   0.86 with 3V3 on I+ means IN- saw nothing: check the I- side of the loop
+   first (below). The OG-only `ina_get_power(1)` zero stub is gone
+   (`JumperlessMicroPythonAPI.cpp`).
+4. 5V "floating": routes fine (harness P1: J X14 / L X14). On rev 2 the ADC0
+   reading saturates at 5.0 for anything >= ~4.15 V in (see the offset note),
+   so 5V and floating read alike on ADC0; read 5V on **ADC3** instead.
+5. `TOP_RAIL` / `BOTTOM_RAIL`: not on the crossbar (isNodeValid rejects 101/102,
+   `FileParsing.cpp:2051`), but `jl_nodes_connect_func` /
+   `jl_nodes_fast_connect_func` dropped the return code. Fixed (OG only): the
+   MicroPython `connect`/`fast_connect` raise `ValueError("TOP_RAIL is not
+   routable on this board: the OG rails are set by the supply switch (use 3V3,
+   5V or GND)")`, `dac_set(2|3, ...)` raises, every refused `addBridgeToState`
+   with a rail node prints the same line on serial (`FileParsing.cpp`).
+   `adc_get(4..7)` raises on the OG (RP2040: 4 = temperature, 5-7 absent).
+
+**Host checks:** `test/test_og_analog/run.sh` (new) pins `og_analog.h` to the
+reference's ADC maps, the rev 2 DAC1 L272 model, the rev 3 bench numbers and
+the descriptor (mutating a constant fails 279 checks).
+`test/test_og_router` gained P1-P5 (5V, INA loop, DAC0->row->ADC0,
+DAC1->row->ADC3, supplies -> row -> ADC1/2/3) and three **known-open** cases
+K1-K3, not counted: a supply DIRECTLY to ADC1 or ADC2 (no row in the net) is
+left unrouted - the I->A->K three-chip path keeps a -2 Y position
+(`./test_og_router v`, case K1). Through a row it routes. Router untouched
+per the brief; this is probably what "ADC1/ADC2 read a constant with anything
+routed" also hit when the ADC was bridged straight to 3V3/GND.
+
+**The rev 2 ADC0 offset (hardware, not fixed):** the reference firmware reads
+GND on ADC0 as 0.84 V on this board, and so does this build (raw ~690 = 0.55
+V at the pin, 0.85 V in input terms) - 3V3 reads ~4.2, so the map is
+`reading = Vin + 0.85`, saturating at ~4.15 V in. The rev 3.1 board read GND
+as 0.05. Same firmware, same formula, so it is the U11/U7 buffer chain on
+this unit (or an unpowered U11: +8V/-8V via JP4/JP8/D64/D69). A DMM on TP9
+(`ADC 0 IN`) vs GPIO 26 with GND routed says which stage. The 1.3.22 scaling
+is kept as asked; a per-board zero is NOT invented.
+
+**Bench expectations (rev 2, this build):** `adc_get(0)` GND ~0.84, 3V3
+~4.2, 5V 5.00 (saturated); `adc_get(3)` GND ~0.0, 3V3 ~3.3, 5V ~5.0 within
+the reference map's error (if it reads ~-1.3 / ~2.2 / ~4.0 the schematic
+model is the right one - report it); `dac_set(0, 2.5)` -> row -> `adc_get(0)`
+~3.35 (= 2.5 + the 0.85 offset) or 2.5 on ADC3; `dac_set(1, 0.0)` -> ADC3 ~0,
+`dac_set(1, 3.0)` ~3.0, `dac_set(1, -3.0)` ~-3.0; INA: `3V3 -> I_P`, `I_N ->
+1k -> GND` gives `get_bus_voltage(0)` ~2.0 and `get_ina_current(0)` ~0.002
+(A); with the LED, current ~0.002-0.003 and bus ~1.8-2.0 (LED forward
+voltage) - a bus voltage stuck at 0.86 means the I_N side is open.
+`fast_connect(8, "TOP_RAIL")` -> ValueError. `dac_get` still reports what was
+asked, not a read-back.
+
+**Build:** `jumperless_og` RAM 61.5 % (161256 B), flash 1.90 MB;
+`.pio/build/jumperless_og/firmware.uf2`. V5 env builds (the new code is
+runtime-gated on `caps.spiDac` / `OG_JUMPERLESS`).
+
+**The ~80 ms after every fast_connect is the slot auto-save, not the
+render (same branch, from the coordinator's fixture: a fast_connect on an
+EXISTING bridge - no routing change, no LED change - cost the same 86 ms;
+`refresh=False` did not help; the 80 ms is appended after the script no
+matter what follows; the next readback exec paid it too).** Cause, three
+parts: (1) `JumperlessState::addConnection` (States.cpp) on an existing pair
+called `markDirty()` even with `duplicates=-1` (nothing changed);
+(2) `systemIdleForFlush()` gates the slot auto-save on 750 ms since
+`lastUserInputMs`, which only port-1 commands, the encoder and the probe
+bump - raw-REPL bytes never did, so a script that dirtied the slot was
+"idle" the instant it ended and `SlotManager` ran `saveActiveSlot`
+(toYAML + FatFS write on FS_TINY + flash erase/program with interrupts
+masked, core 1 parked) right behind the reply; (3) `fast_connect` on an
+existing bridge rebuilt and re-sent every path anyway. Fixes: a plain
+re-add no longer dirties the slot (only an explicit, changed duplicate
+count does); `MpRemoteService` calls `noteUserInput()` for every raw-REPL
+batch, so the auto-save waits for a 750 ms quiet window like every other
+input (a script that dirtied the slot is saved 750 ms after the last REPL
+byte - if a fixture streams commands for minutes, the save waits for the
+first pause); `connect/disconnect/fast_connect/fast_disconnect` return
+without a rebuild when the pair already is / is not a bridge
+(`duplicates<0`) - the crossbar already matches the netlist. A connect that
+changes something now costs the rebuild + the crosspoint send only.
+Also: the ONE nets render after a routing change skips the GPIO /
+fake-GPIO / measurement scans (`main.cpp` loop1, keyed on
+`routingGeneration`); they run on the next pass, a tick later.
+**`debug.repl_timing`** (new config flag, `tubes/ReplTiming.cpp`) prints one
+line per raw-REPL exec on port 1: reply flushed -> tx-complete on the wire
+(`tud_cdc_tx_complete_cb`), core 1's render window with per-stage us
+(nets / gpio+fake / meas / anim+overlays / show), and any auto-save window -
+whatever sits between "done" and "wire" is what the host waited on. Turn it
+on for the fixture; it costs a few volatile stamps otherwise. **Not
+measured here (no board)** - expected: change_refresh and ops_nochange
+drop to the REPL floor + the crosspoint send (a few ms), with `[replt]`
+showing `save -1..-1` on every line until the 750 ms quiet window.
+Harness: 21/21, crosspoint digest byte-identical to 117bb11.
+
+**`connect_many()` - one rebuild for a batch (same branch).** Fixture,
+k bridges moved per frame (k fast_disconnect + k fast_connect), on-board:
+k=1 3 ms, 4 10, 8 22, 16 56, 24 97 ms - every call re-routes the whole net,
+so a batch is O(k^2). `connect_many(connect=[(a,b),...], disconnect=[...],
+duplicates=-1, *, refresh=True) -> int` (`modjumperless.c`,
+`JumperlessMicroPythonAPI.cpp` jl_nodes_batch_*) applies the disconnects
+then the connects to the netlist (`add/removeBridgeFromState` with
+autoRefresh=false), then ONE `fastRefresh` routes and posts ONE crosspoint
+send, and one LED show or hold - the guarantees of fast_connect on return.
+Returns the number of edits that changed something; no change = no
+rebuild, no send. Both boards; qstr `connect_many` hand-added. Harness
+case 9 (k = 1/4/8/24): the batch's bridge list and closed crosspoints are
+byte-identical to k sequential erase+append rebuilds (the firmware's
+rebuild is a function of `connections.bridges[]` in stored order, and a
+disconnect compacts + a connect appends the same way in both). Expected
+on-board for k=24: one rebuild of a 24-bridge net (the fixture's own last
+sequential step, ~4 ms) plus the send - under the 15 ms target;
+**not measured here.**
+
+**Readback without the allocation storm (same branch).** Through MCP a
+1-LED frame is 24 ms and a 24-bridge frame 94 ms after the batch fix; the
+remainder was Python readback (~40 C calls at 0.3-0.8 ms each plus the
+dicts: `get_all_nets` + 24x `get_bridge` + 24x `get_path_info` = 51 ms),
+and `get_all_paths()` exhausts the 40 KB heap at 60 paths. Three additions
+(`modjumperless.c`, `JumperlessMicroPythonAPI.cpp`, both boards):
+- **`get_netlist() -> str`** (`get_state()` was taken - it is the JSON
+  state): one string, one allocation, built on the C side into a growing
+  vstr. Lines `<net>|<node>,...` for every net with two or more members,
+  nodes by canonical name (`jl_get_node_name`, what `str(node(x))` prints),
+  then `unrouted|a-b,c-d,...` - every bridge with no clean path. Bench:
+  1 ms for 54 bridges, 2 ms for the 30 cross links. The rule lives in
+  `routing/PathHealth.h` (Arduino-free). Its first version ("every stage
+  with a chip must have x and y") had FALSE POSITIVES on hardware: GND on
+  all 60 rows flagged GND-1/30/31/60 while the ADC read them connected -
+  the corner-through-L shape legitimately ends `{chip, x -1, y}` and
+  `sendPath` simply skips a hop whose x or y is -1. The rule now (validated
+  on the bench with LEDs + ADC, and host-checked BOTH WAYS against the
+  crossbar model): stages 0 and 1 complete, stage 2 complete when its chip
+  is set, stage 3 never required, and -2 (the router's deferred sentinel)
+  anywhere = unrouted (the known-open direct supply->ADC1/ADC2 paths end
+  `{chip -1, x 9, y -2}`). Harness: for every bridge, close only its own
+  primary path's complete hops and ask whether they join its nodes; rule
+  clean <=> joined, asserted over every case (incl. GND on all 60 rows +
+  D0..D2 + ADC0-45, the P/K cases, the 30 cross links: 18 open by the
+  model, 18 by the rule) and 10 000 random trials.
+- **`connect_many(want=[(a,b),...])`**: replace semantics - the firmware
+  diffs the requested set against its bridge table (pairs
+  order-independent), removes user bridges not in want, adds want pairs
+  not present (infra bridges untouched), then the one rebuild/send/show.
+  connect=/disconnect= still work (want applies first).
+- **`get_path_flat(i)`**: `get_path_info(i)` as a 20-int tuple (small ints
+  are unboxed, one allocation). `get_bridge(i)` already returns a 3-tuple;
+  `get_num_*` are plain ints.
+Expected on-board cost of `get_netlist()` (not measured here): the net
+lines are a name lookup + memcpy per node (~2 us), the unrouted section
+one pass over paths[] per bridge (72 x 72 compares worst case) - well
+under 1 ms for a 24-bridge net and ~1 ms for 60, against the 51 ms the
+three Python loops cost. Harness 30/30, digest unchanged.
+
+### Session 2026-09-12 — perf round 3 (branch `opt/perf-round3`, 89472a1..7183cd3) — MEASURED on the rev 2
+
+Full plan and review history: jumperless-mcp `PERF_PLAN.md` / `PERF_VERIFICATION.md`.
+
+- **`connect_many(want="<id>:<p>,<p>;…")`** — the string form parsed in C
+  (`modules/jumperless/pair_str.h`, two-pass: validate everything, then edit;
+  `ValueError` leaves the netlist untouched). The MicroPython compiler costs
+  ~40 µs/byte on the RP2040: a 24-pair dict literal compiles in 6.8 ms, the
+  string in 2.3. MCP 24-bridge scale 23.6 → 17.0 ms, alternating 15.3 → 12.5.
+  Host test `test/test_pair_str/run.sh`.
+- **RAM: −18 984 B of true frees** (`__end__` 0x20027c74 → 0x2002324c,
+  `ram-report.sh` gate 0x20024000 met with 3 508 B spare): dead WaveGen DMA
+  ring + alignment pad, `slicedLines[130]`, UART response queue 8 → 4,
+  `MICROPY_PY_MATH_SPECIAL_FUNCTIONS` off (erff/lgammaf were 4.7 KB of
+  **.data** — arduino-pico links libm into RAM), Abramowitz-Stegun erf in
+  Debugs (−4.4 KB .data), MenuTransitions frames 300 → 112 px. The 2 KB RX
+  ring stays: an overflow witness is unprovable on rev 2 (RP_UART_TX/RX
+  crossbar nodes read floating), but `rx_dma_sync_head` now counts unmasked
+  (DMA transfer count) and `uart_stats()` / `uart_send()` exist for the day
+  it is.
+- **MicroPython heap 40 → 56 KB** (`MICROPY_HEAP_SIZE`), ladder now
+  {cfg, cfg−8K, 48, 40, …} so a short build lands one rung down, never on 32.
+  On the board: `[MP] GC heap: 56 KB (19.7 KB C heap left)`, pool 56 000,
+  `gc.mem_free()` 41 376 after the helper import. `c_heap_free()` added.
+- Probe (host side, jumperless-mcp): `dwell_ms` + a read-only pre-check,
+  6.58 → 3.92 s; settle stays 12 ms.
+- Host tests at 7183cd3: `test_og_router` 0 failing (1844 bridges, PathHealth
+  rule == own-path truth both ways), `test_og_analog` pass, `test_pair_str`
+  pass. V5 env builds (RAM 57.6 %, flash 16.5 %).
+
 ### Phase 2 — analog + probe
 - [x] SPI `MCP4822` DAC backend (2026-09-08; measured DAC0 0–4.096 V, DAC1
       −6.9..+7.0 V - see the session above; `caps.spiDac`).
-- [x] 4 ADCs scaled from the descriptor (ADC3 ±8 V), both INA219s (2026-09-08).
+- [x] rev 2 `2x MCP4725` I2C DAC backend, auto-detected at boot like the
+      reference (2026-09-11; DAC1 map from the schematic, bench pending).
+- [x] 4 ADCs scaled from the descriptor (ADC3 ±8 V), both INA219s (2026-09-08);
+      constants no longer clobbered by the config `[calibration]` block
+      (2026-09-11, `og_analog.h` + `test/test_og_analog`).
 - [ ] 3 routable GPIO + single routable `NANO_RESET` (UART pins are right now;
       `RP_GPIO_0` routing itself untested; the UART node naming is a design call).
 - [x] Scanning probe ported from the OG reference firmware (2026-09-07,
@@ -1255,6 +1763,13 @@ Injecting a button press still works the same way: write 2 to
 ## Key files
 
 - Contract: `src/boards/board.h`, `src/boards/board.cpp`
+- Routing state: `src/routing/MatrixState.h` (`netStruct`/`pathStruct`),
+  `src/routing/NetBridges.h` (per-net bridge lists: OG pool / V5 table),
+  `src/JumperlessDefines.h` (`MAX_NODES`/`MAX_BRIDGES`, the `jl_*` storage
+  typedefs)
+- Router test: `test/test_og_router/run.sh` (host build of the OG router
+  against a crossbar model; `OG_ROUTER_DIGEST=1` and a clang-UBSan recipe in
+  the header)
 - Descriptors: `src/boards/v5/board_v5.cpp`, `src/boards/og/board_og.cpp`
 - Build: `platformio.ini` (`[env:jumperless_og]`)
 - Test: `test/test_boards/test_boards.cpp`

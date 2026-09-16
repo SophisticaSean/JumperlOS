@@ -28,6 +28,8 @@ KevinC@ppucc.io
 #include "ArduinoStuff.h"
 #include "CH446Q.h"
 #include "Commands.h"
+#include "ReplTiming.h"   // debug.repl_timing: core 1 render stamps
+#include "RouteSafety.h"   // routingGeneration (the post-route repaint skips the scans)
 #include <EEPROM.h>
 #include <JeoPixel.h>
 #include <SPI.h>
@@ -224,6 +226,9 @@ static inline void armStackLimit( uint32_t floorAddr ) {
     __asm volatile( "isb" ::: "memory" );
 }
 #endif
+
+// Core-1 GPIO/ADC scan passes (readGPIO/readFakeGPIO ran), read by jumperless.slot_stats().
+volatile uint32_t coreOneScanPasses = 0;
 
 void setup( ) {
 #ifdef PICO_RP2350
@@ -953,6 +958,18 @@ menu:
         // here, repaint its pass/fail LED overlay from the one-shot marker
         // (deleted inside, so the overlay clears on the next reset).
         selfTestShowSavedResultIfPending( );
+
+        // A board that failed its own crossbar / tip-voltage / PSRAM /
+        // peripheral test must not come up energized re-applying slot 0 - the
+        // self-test teardown restores the SAVED rail voltages. probe_cable
+        // alone is the normal headless case and is allowed through.
+        if ( selfTestStoredHardFailure( ) ) {
+            Serial.println( "\n\rSELF TEST FAILED (not just the probe) - DACs parked at 0 V and the saved\n\r"
+                            "netlist is NOT applied. See /selftest.json; fix the board before using it." );
+            for ( int d = 0; d <= 3; d++ )
+                setDacByNumber( d, 0.0f, 0 );
+            globalState.clearAllConnections( );
+        }
 
         printColorJogoSmall( );
         // If the previous run ended in a HardFault, say so right here - once -
@@ -1953,9 +1970,15 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
 
         // (a pending path send goes first: the LED branch waits for the SEND
         // slots to be idle, exactly as it waited for sendAllPathsCore2 == 0)
+        // ledRepaintHeld (leds_hold / connect(refresh=False)): skip the nets
+        // render - the request stays posted (a peek is not a take) and the
+        // swirl-only pass is skipped too - so a crosspoint send posted mid-batch
+        // is served on the next pass. A menu/graphics flush is interactive and
+        // still runs. leds_flush() drops the hold and posts the one repaint.
         if ( ( ( ledPending && ( loadingFile == 0 || ( ledBits & core1req::LED_GFX ) ) ) ||
                ( swirled == 1 && !ledGraphicsOwned( ) ) ) &&
-             core1req::allIdle( ) ) {
+             core1req::allIdle( ) &&
+             !( ledRepaintHeld && !ledImmediate ) ) {
 
             // Take the request now (its bits are cleared; anything posted while
             // we render stays pending for the next pass - the old
@@ -2036,24 +2059,33 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                         return;
                     }
 
+                    replt::renderStart( );   // debug.repl_timing
                     t[ 6 ] = micros( );
                     showNets( );
-                    if ( debugWaitLoopTimingCore2 ) {
-                        t[ 7 ] = micros( );
-                        if ( ( t[ 7 ] - t[ 6 ] ) > 5000 ) {
-                            // Serial.printf( "CORE2:   showNets() took %lu us\n", t[7] - t[6] );
-                        }
-                    }
+                    t[ 7 ] = micros( );
 
                     // showNets() can take several ms - service the encoder
                     // mid-pass so clickwheel latency doesn't stack up with
                     // the rest of this block (self-throttled, owner core).
                     rotaryEncoderStuff( );
 
+                    // The GPIO / fake-GPIO / measurement scans are background
+                    // work with their own LED feedback; they run every render
+                    // pass. The ONE pass that follows a routing change is the
+                    // repaint a connect is waiting on (its crosspoint send was
+                    // served ahead of it, and the next connect's head wait
+                    // waits for that send), so that pass skips the scans - the
+                    // next pass, a scheduler tick later, runs them as usual.
+                    static uint32_t lastScannedRoutingGen = 0;
+                    const bool postRouteRepaint = ( routingGeneration != lastScannedRoutingGen );
+                    lastScannedRoutingGen = routingGeneration;
                     t[ 8 ] = micros( );
-                    readGPIO( );     // if want, I can make this update the LEDs like 10 times
-                                     // faster by putting outside this loop,
-                    readFakeGPIO( ); // Background reading for fake GPIO inputs with visual updates
+                    if ( !postRouteRepaint ) {
+                        coreOneScanPasses++;   // jumperless.slot_stats()[4]: proves the scans keep running after a route
+                        readGPIO( );     // if want, I can make this update the LEDs like 10 times
+                                         // faster by putting outside this loop,
+                        readFakeGPIO( ); // Background reading for fake GPIO inputs with visual updates
+                    }
                     t[ 9 ] = micros( );
 
                     // CRITICAL: Update ADC/GPIO mappings before reading measurements
@@ -2061,7 +2093,9 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                     // Prevents race condition where Core 0/1 updates paths but Core 2 reads stale ADC mappings
                     // chooseShownReadings( );
 
-                    showLEDmeasurements( );
+                    if ( !postRouteRepaint ) {
+                        showLEDmeasurements( );
+                    }
 
                     t[ 10 ] = micros( );
                     showAllRowAnimations( );
@@ -2145,6 +2179,8 @@ void core2stuff( ) // core 2 handles the LEDs and the CH446Q8
                 xbarLatShow( );           // latency probe: first show after a send (XbarLatency.h)
 
                 t[ 13 ] = micros( );
+                // debug.repl_timing: the render this pass did, stage by stage (us)
+                replt::renderEnd( t[ 7 ] - t[ 6 ], t[ 9 ] - t[ 8 ], 0, t[ 10 ] - t[ 9 ], t[ 11 ] - t[ 10 ], t[ 13 ] - t[ 12 ] );
 
                 // Update probe LEDs to reflect current state
 

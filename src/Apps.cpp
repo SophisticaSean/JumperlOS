@@ -2848,9 +2848,23 @@ if ( yesNo == 1 ) {
         // touch (probe button / encoder / serial byte) chains into the
         // interactive probe pad calibration instead of resetting - they are
         // already at the board, so use the moment to align the pad map.
-        selfTestWaitForInput( "start probe pad calibration" );
+        // Bounded: nobody is standing at a board that was flashed headless
+        // (mass flashing, usbip, CI), and this used to block the REPL forever.
+        const unsigned long kFirstStartInputTimeoutMs = 120000;   // 2 minutes
+        bool touched = selfTestWaitForInput( "start probe pad calibration",
+                                            kFirstStartInputTimeoutMs );
         selfTestClearOverlay( );
-        probeCalibApp( ); // saves config (incl. pad endpoints) on finish
+        if ( touched ) {
+            probeCalibApp( ); // saves config (incl. pad endpoints) on finish
+        } else {
+            // calibrateDacs() set configChanged, but the only saveConfig() the
+            // first-start chain can reach is inside probeCalibApp, and the
+            // implicit save runs from the main loop this chain never reaches -
+            // it ends in rp2040.restart(). Without this the DAC calibration
+            // just measured is thrown away by the reboot.
+            Serial.println( "No input - keeping the default probe pad map." );
+            saveConfig( );
+        }
 
         // Start the device with a clean undo/redo history: the calibration
         // connects/disconnects above are internal setup, not user actions, and

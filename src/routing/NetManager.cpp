@@ -594,15 +594,10 @@ void combineNets(int foundNode1Net, int foundNode2Net) {
         addNodeToNet(foundNode1Net, globalState.connections.nets[foundNode2Net].nodes[i]);
         }
 
-      for (int i = 0; i < MAX_NODES; i++) {   // the per-net table is
-        // bridges[MAX_NODES][2] - reading to MAX_BRIDGES walked past it and
-        // a full table's specialFunction=-1 read as a live bridge (sweep)
-        if (globalState.connections.nets[foundNode2Net].bridges[i][0] == 0) {
-          break;
-          }
-
-        addBridgeToNet(foundNode1Net, globalState.connections.nets[foundNode2Net].bridges[i][0],
-                       globalState.connections.nets[foundNode2Net].bridges[i][1]);
+      // Append net 2's bridges to net 1 in their order (the OG pool hands
+      // net 1 fresh entries, net 2's list is untouched until deleteNet frees it)
+      for (netbridges::Iter it = netbridges::begin(globalState.connections.nets[foundNode2Net]); it.valid(); it.next()) {
+        addBridgeToNet(foundNode1Net, it.node1(), it.node2());
         }
       for (int i = 0; i < MAX_DNI; i++) {
         if (globalState.connections.nets[foundNode2Net].doNotIntersectNodes[i] == 0) {
@@ -703,6 +698,9 @@ int shiftNets(
   // DisplayState custom names/colors are reconciled via reconcileAfterRebuild()
   // after nets are rebuilt from bridges in refreshConnections()
 
+  // The deleted net's bridge list is freed BEFORE the shift overwrites its
+  // header (OG pool; V5 zeroes the inline table either way).
+  netbridges::clear(globalState.connections.nets[deletedNet]);
   for (int i = deletedNet; i < lastNet; i++) {
     globalState.connections.nets[i] = globalState.connections.nets[i + 1];
     globalState.connections.nets[i].name = netNameConstants[i];
@@ -736,14 +734,10 @@ int shiftNets(
     globalState.connections.nets[lastNet].nodes[j] = 0;
     }
 
-  for (int j = 0; j < MAX_NODES; j++) {   // table is [MAX_NODES][2] (sweep)
-    if (globalState.connections.nets[lastNet].bridges[j][0] == 0) {
-      break;
-      }
-
-    globalState.connections.nets[lastNet].bridges[j][0] = 0;
-    globalState.connections.nets[lastNet].bridges[j][1] = 0;
-    }
+  // nets[lastNet] is now a copy of the net that was shifted down into
+  // lastNet-1 (or the deleted net itself, already freed above): forget the
+  // list header without freeing entries that belong to that net.
+  netbridges::detach(globalState.connections.nets[lastNet]);
   return lastNet;
   }
 
@@ -834,15 +828,17 @@ void createNewNet() // add those nodes to a new net
 void addBridgeToNet(uint16_t netToAddBridge, int16_t node1,
                     int16_t node2) // just add those nodes to the net
   {
-  int newBridgeIndex = findFirstUnusedBridgeIndex(netToAddBridge);
-  if (newBridgeIndex < 0 || newBridgeIndex >= MAX_NODES) {
+  if (!netbridges::append(globalState.connections.nets[netToAddBridge], node1, node2)) {
+    // V5: this net's inline table (MAX_NODES slots) is full. OG: the shared
+    // pool (2*MAX_BRIDGES entries) is - which no netlist that fits
+    // MAX_BRIDGES can do. Either way the bridge is listed but NOT routed.
     Serial.print("net ");
     Serial.print(netToAddBridge);
-    Serial.println(" bridge table full - connection listed but not tracked per-net");
+    Serial.print(": bridge pool full (");
+    Serial.print(netbridges::capacity());
+    Serial.println(" entries) - connection listed but NOT routed");
     return;
   }
-  globalState.connections.nets[netToAddBridge].bridges[newBridgeIndex][0] = node1;
-  globalState.connections.nets[netToAddBridge].bridges[newBridgeIndex][1] = node2;
   }
 
 void populateSpecialFunctions(int net, int node) {
@@ -997,13 +993,28 @@ void addNodeToNet(int netToAddNode, int node) {
     }
 
   if (newNodeIndex < 0 || newNodeIndex >= MAX_NODES) {
-    if (debugNM) {
-      Serial.print("net ");
-      Serial.print(netToAddNode);
-      Serial.println(" is full - node not added (too many rows in one net)");
-    }
+    // Not debug-gated: the node is in the netlist the user sees but will not
+    // be routed, and the only other trace of that is the bridge-table message.
+    Serial.print("net ");
+    Serial.print(netToAddNode);
+    Serial.print(" is full (MAX_NODES=");
+    Serial.print(MAX_NODES);
+    Serial.println(") - node not added, it will NOT be routed");
     return;
   }
+#if defined(OG_JUMPERLESS)
+  // nodes[] is a byte wide here (jl_netNode_t). Every id isNodeValid() admits
+  // is 1..189, so this never fires for a real node; it exists so a corrupt id
+  // can never be truncated onto another row.
+  if (node > 255) {
+    Serial.print("net ");
+    Serial.print(netToAddNode);
+    Serial.print(": node id ");
+    Serial.print(node);
+    Serial.println(" out of range - node not added");
+    return;
+  }
+#endif
   globalState.connections.nets[netToAddNode].nodes[newNodeIndex] = node;
   updateCurrentSenseNetName(netToAddNode);
   }
@@ -1027,21 +1038,10 @@ int findFirstUnusedNetIndex() // search for a free globalState.connections.nets[
   }
 
 int findFirstUnusedBridgeIndex(int netNumber) {
-  // The per-net table is bridges[MAX_NODES][2] - scanning to MAX_BRIDGES
-  // (72/128) read PAST it, and the 0x7f fallback wrote even further: on a
-  // 25+-bridge GND bus the overflow landed in the net's DNI safety list and
-  // marched into the neighbor net's name pointer on every rebuild (sweep
-  // finding, high). Full table = refuse, never write out of bounds.
-  for (int i = 0; i < MAX_NODES; i++) {
-    if (globalState.connections.nets[netNumber].bridges[i][0] == 0) {
-      // if(debugNM) Serial.print("found unused bridge ");
-      // if(debugNM) Serial.println(i);
-
-      return i;
-      break;
-      }
-    }
-  return 0x7f;
+  // Number of bridges filed under the net = the next free slot. (The old
+  // table scan to MAX_BRIDGES read PAST bridges[MAX_NODES][2] and the 0x7f
+  // fallback wrote even further - sweep finding, high; the list API cannot.)
+  return netbridges::count(globalState.connections.nets[netNumber]);
   }
 
 int findFirstUnusedNodeIndex(int netNumber) // search for a free globalState.connections.nets[]
@@ -2169,13 +2169,13 @@ int printNodeOrName(
       }
   }
 
-const char* defNanoToCharShort[35] = {
+const char* const defNanoToCharShort[35] = {
     "VIN",  "D0",   "D1",   "D2",     "D3",     "D4",       "D5",     "D6",
     "D7",   "D8",   "D9",   "D10",    "D11",    "D12",      "D13",    "3V3",
     "AREF", "A0",   "A1",   "A2",     "A3",     "A4",       "A5",     "A6",
     "A7",   "RST0", "RST1", "N_GND1", "N_GND0", "NANO_3V3", "NANO_5V" };
 
-const char* defSpecialToCharShort[49] = {
+const char* const defSpecialToCharShort[49] = {
     "GND",      "TOP_R",   "BOT_R",   "3V3",       "TOP_GND",  "5V",
     "DAC_0",    "DAC_1",   "I_POS",   "I_NEG",     "ADC_0",    "ADC_1",
     "ADC_2",    "ADC_3",   "ADC_4",   "ADC_7",     "UART_Tx",  "UART_Rx",
@@ -2186,7 +2186,7 @@ const char* defSpecialToCharShort[49] = {
     "BLDG_BOT", "BUF_IN",  "BUF_OUT"
   };
 
-const char* defNanoToCharLong[35] = {
+const char* const defNanoToCharLong[35] = {
     "NANO_VIN",   "NANO_D0",   "NANO_D1",     "NANO_D2",     "NANO_D3",
     "NANO_D4",    "NANO_D5",   "NANO_D6",     "NANO_D7",     "NANO_D8",
     "NANO_D9",    "NANO_D10",  "NANO_D11",    "NANO_D12",    "NANO_D13",
@@ -2195,7 +2195,7 @@ const char* defNanoToCharLong[35] = {
     "NANO_RST0",  "NANO_RST1", "NANO_N_GND1", "NANO_N_GND0", "NANO_3V3",
     "NANO_5V" };
 
-const char* defSpecialToCharLong[49] = {
+const char* const defSpecialToCharLong[49] = {
     "GND",         "TOP_RAIL",     "BOTTOM_RAIL",  "SUPPLY_3V3",
     "TOP_GND",     "SUPPLY_5V",    "DAC0",         "DAC1",
     "ISENSE_PLUS", "ISENSE_MINUS", "ADC0",         "ADC1",

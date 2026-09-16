@@ -90,6 +90,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # "it only exists if this build produced it" holds only while nothing
+          # under .pio is tracked - a tracked blob is restored by checkout and
+          # this guard would pass on a stale 4 MB artifact.
+          if git ls-files --error-unmatch .pio/build/jumperless_v5/firmware.uf2 >/dev/null 2>&1; then
+            echo "::error::.pio/build/jumperless_v5/firmware.uf2 is a TRACKED file - this would publish a stale UF2"
+            exit 1
+          fi
           if [ ! -f .pio/build/jumperless_v5/firmware.uf2 ]; then
             echo "::error::V5 build did not produce firmware.uf2"
             ls -la .pio/build/jumperless_v5 || true

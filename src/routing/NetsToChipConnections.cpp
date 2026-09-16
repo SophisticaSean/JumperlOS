@@ -1917,18 +1917,15 @@ void sortPathsByNet(
       break;
     }
 
-    for (int k = 0; k < MAX_NODES; k++) {
-      if (globalState.connections.nets[j].bridges[k][0] == 0) {
-        break;
-        // continue;
-      } else {
+    for (netbridges::Iter it = netbridges::begin(globalState.connections.nets[j]); it.valid(); it.next()) {
+      {
         // paths[] is [MAX_BRIDGES], but the per-net entries can total more than
         // that: combineNets lists one merged bridge under both surviving nets.
         if (pathIndex >= MAX_BRIDGES) {
           break;
         }
-        int node1 = globalState.connections.nets[j].bridges[k][0];
-        int node2 = globalState.connections.nets[j].bridges[k][1];
+        int node1 = it.node1();
+        int node2 = it.node2();
         
         globalState.connections.paths[pathIndex].net = globalState.connections.nets[j].number;
         globalState.connections.paths[pathIndex].node1 = node1;
@@ -2380,10 +2377,22 @@ void bridgesToPaths(
     Serial.println(")");
   }
 
-  // Performance profiling (matches PROFILE_FAST_REFRESH in Commands.cpp)
+  // Performance profiling (matches PROFILE_FAST_REFRESH in Commands.cpp).
+  // Settable from the build without editing this file:
+  //   PLATFORMIO_BUILD_FLAGS="-DPROFILE_BRIDGES_TO_PATHS=1" pio run -e jumperless_v5
+  #ifndef PROFILE_BRIDGES_TO_PATHS
   #define PROFILE_BRIDGES_TO_PATHS 0
+  #endif
   unsigned long btp_start = micros();
   unsigned long btp_step = btp_start;
+  #if PROFILE_BRIDGES_TO_PATHS
+  // The phase lines are BUFFERED: printing them inline over USB CDC costs tens
+  // of microseconds each (unbounded if the host is not draining), and the total
+  // below is stamped from btp_start - it would measure its own reporting.
+  struct { const char* name; unsigned long us; } btp_ph[ 12 ];
+  int btp_np = 0;
+  #define BTP_PHASE(nm) do { if (btp_np < 12) { btp_ph[btp_np].name = (nm); btp_ph[btp_np].us = micros() - btp_step; btp_np++; } btp_step = micros(); } while (0)
+  #endif
 
   // Only clear pathsWithCandidates if starting from 0
   if (startIndex == 0) {
@@ -2399,8 +2408,7 @@ void bridgesToPaths(
   if (startIndex == 0) {
     sortPathsByNet();
     #if PROFILE_BRIDGES_TO_PATHS
-    Serial.print("  sortPathsByNet: "); Serial.print(micros() - btp_step); Serial.println(" us");
-    btp_step = micros();
+    BTP_PHASE("sortPathsByNet");
     #endif
     
     // TDM OPTIMIZATION: Merge all fake GPIO input paths into a single net
@@ -2495,23 +2503,20 @@ void bridgesToPaths(
   }
 
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  path analysis loop: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("path analysis loop");
   #endif
 
   // Only resort if starting from beginning (sorting is global and breaks incremental)
   if (startIndex == 0) {
     sortAllChipsLeastToMostCrowded();
     #if PROFILE_BRIDGES_TO_PATHS
-    Serial.print("  sortAllChipsLeastToMostCrowded: "); Serial.print(micros() - btp_step); Serial.println(" us");
-    btp_step = micros();
+    BTP_PHASE("sortAllChipsLeastToMostCrowded");
     #endif
   }
 
   resolveChipCandidates(startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  resolveChipCandidates: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("resolveChipCandidates");
   #endif
 
   // Primary pass under the chip-K y-row budget (see kRowBudgetRefuses)
@@ -2520,20 +2525,17 @@ void bridgesToPaths(
 
   commitPaths(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  commitPaths: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("commitPaths");
   #endif
 
   resolveAltPaths(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  resolveAltPaths: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("resolveAltPaths");
   #endif
   
   resolveUncommittedHops(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  resolveUncommittedHops: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("resolveUncommittedHops");
   #endif
 
   kRowBudgetActive = false;
@@ -2560,8 +2562,7 @@ void bridgesToPaths(
       resolveUncommittedHops(2, -1, 0, startIndex);
       kRowRescuePass = false;
       #if PROFILE_BRIDGES_TO_PATHS
-      Serial.print("  K-row rescue pass: "); Serial.print(micros() - btp_step); Serial.println(" us");
-      btp_step = micros();
+      BTP_PHASE("K-row rescue pass");
       #endif
     }
   }
@@ -2628,8 +2629,7 @@ void bridgesToPaths(
   checkForOverlappingPaths();
   validateAllPaths();
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  validation: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("validation");
   #endif
 
   //   printPathsCompact(2 );
@@ -2664,7 +2664,12 @@ void bridgesToPaths(
 
   #if PROFILE_BRIDGES_TO_PATHS
   unsigned long btp_total = micros() - btp_start;
+  for (int i = 0; i < btp_np; i++) {
+    Serial.print("  "); Serial.print(btp_ph[i].name); Serial.print(": ");
+    Serial.print(btp_ph[i].us); Serial.println(" us");
+  }
   Serial.print("  bridgesToPaths TOTAL: "); Serial.print(btp_total); Serial.println(" us");
+  #undef BTP_PHASE
   #endif
   
   // Update live crossbar display if enabled
@@ -2700,16 +2705,7 @@ void fillUnusedPaths(int duplicatePathsOverride, int duplicatePathsPower,
       // Serial.println(globalState.connections.nets[n].nodes[i]);
     }
 
-    for (int i = 0; i < MAX_NODES; i++) {
-      if (globalState.connections.nets[n].bridges[i][0] == 0) {
-        break;
-      }
-      bridgeCount[n]++;
-      // Serial.print(" \n\rbridges: ");
-      // Serial.print(globalState.connections.nets[n].bridges[i][0]);
-      // Serial.print("-");
-      // Serial.println(globalState.connections.nets[n].bridges[i][1]);
-    }
+    bridgeCount[n] = netbridges::count(globalState.connections.nets[n]);
     // Serial.println("\n\r");
   }
 
@@ -7326,6 +7322,7 @@ void swapNodes(int pathIndex) {
 
 int xMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;   // a node this board does not map asks with chip -1 (same guard as the OG router)
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip].xMap[i] == node) {
       nodeFound = i;
@@ -7346,6 +7343,7 @@ int xMapForNode(int node, int chip) {
 
 int yMapForNode(int node, int chip) {
   int nodeFound = -1;
+  if (chip < 0 || chip >= 12) return -1;   // a node this board does not map asks with chip -1 (same guard as the OG router)
   for (int i = 1; i < 8; i++) {
     if (globalState.connections.chipStates[chip].yMap[i] == node) {
       nodeFound = i;
@@ -7357,6 +7355,7 @@ int yMapForNode(int node, int chip) {
 
 int xMapForChipLane0(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 16; i++) {
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       nodeFound = i;
@@ -7367,6 +7366,7 @@ int xMapForChipLane0(int chip1, int chip2) {
 }
 int xMapForChipLane1(int chip1, int chip2) {
   int nodeFound = -1;
+  if (chip1 < 0 || chip1 >= 12) return -1;
   for (int i = 0; i < 15; i++) {   // i+1 below: 15 is the last valid pair start
     if (globalState.connections.chipStates[chip1].xMap[i] == chip2) {
       if (globalState.connections.chipStates[chip1].xMap[i + 1] == chip2) {

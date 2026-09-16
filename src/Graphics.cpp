@@ -637,10 +637,17 @@ static void addVirtualCurrentSensePath() {
   }
   
   // Collect all breadboard nodes from both nets
-  int plusNodesTop[MAX_NODES];
-  int plusNodesBottom[MAX_NODES];
-  int minusNodesTop[MAX_NODES];
-  int minusNodesBottom[MAX_NODES];
+  // Breadboard rows only (1..60). The OG stores them a byte wide so this
+  // frame stays small with MAX_NODES = 64 (core 1 stack); V5 is unchanged.
+#if defined(OG_JUMPERLESS)
+  typedef jl_netNode_t senseRow_t;
+#else
+  typedef int senseRow_t;
+#endif
+  senseRow_t plusNodesTop[MAX_NODES];
+  senseRow_t plusNodesBottom[MAX_NODES];
+  senseRow_t minusNodesTop[MAX_NODES];
+  senseRow_t minusNodesBottom[MAX_NODES];
   int plusTopCount = 0, plusBottomCount = 0;
   int minusTopCount = 0, minusBottomCount = 0;
   
@@ -670,7 +677,7 @@ static void addVirtualCurrentSensePath() {
   int minusNode = -1;
   
   // Helper lambda to find closest pair of nodes
-  auto findClosestPair = [](int* arr1, int count1, int* arr2, int count2, int& node1, int& node2) {
+  auto findClosestPair = [](const senseRow_t* arr1, int count1, const senseRow_t* arr2, int count2, int& node1, int& node2) {
     int minDistance = 9999;
     for (int i = 0; i < count1; i++) {
       for (int j = 0; j < count2; j++) {

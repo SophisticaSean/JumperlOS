@@ -243,6 +243,15 @@ bool addBridgeToState(int node1, int node2, int duplicates, bool autoRefresh) {
     bool success = globalState.addConnection(node1, node2, errorMsg, duplicates);
     
     if (!success) {
+#if defined(OG_JUMPERLESS)
+        // Say it every time, not only under debugFP: the OG's TOP_RAIL /
+        // BOTTOM_RAIL are fed by the DP3T supply switch (+3V3 / +5V / +-8V),
+        // not the crossbar, so a rail ask can only ever connect nothing.
+        // (isNodeValid() rejects them because no chip X/Y pin carries 101/102.)
+        if (node1 == TOP_RAIL || node1 == BOTTOM_RAIL || node2 == TOP_RAIL || node2 == BOTTOM_RAIL) {
+            Jerial.println("TOP_RAIL / BOTTOM_RAIL are not routable on this board: the rails are set by the supply switch. Use 3V3, 5V or GND.");
+        }
+#endif
         if (debugFP) {
             Jerial.print("addBridgeToState failed: ");
             Jerial.println(errorMsg);
@@ -1341,8 +1350,6 @@ void clearNodeFile(int slot, int flashOrLocal) {
   // }
 }
 
-String slicedLines[130];
-int slicedLinesIndex = 0;
 
 // Global variables for storing last removed nodes
 int lastRemovedNodes[20] = {-1};
@@ -2831,7 +2838,10 @@ void parseStringToBridges(void) {
     // Jerial.print("stringIndex = ");
     // Jerial.println(stringIndex);
 
-    buffer.toInt(globalState.connections.paths[newBridgeIndex].node1);
+    { // toInt wants an int&; the path stores node ids narrower on the OG
+      int parsedNode = 0;   // toInt leaves it alone when the token is not a number
+      if (buffer.toInt(parsedNode)) globalState.connections.paths[newBridgeIndex].node1 = parsedNode;
+    }
 
     // Jerial.print("globalState.connections.paths[newBridgeIndex].node1 = ");
     // Jerial.println(globalState.connections.paths[newBridgeIndex].node1);
@@ -2844,7 +2854,10 @@ void parseStringToBridges(void) {
     stringIndex =
         specialFunctionsString.stoken(buffer, stringIndex, delimiters);
 
-    buffer.toInt(globalState.connections.paths[newBridgeIndex].node2);
+    {
+      int parsedNode = 0;
+      if (buffer.toInt(parsedNode)) globalState.connections.paths[newBridgeIndex].node2 = parsedNode;
+    }
 
     if (debugFP) {
       Jerial.print("node2 = ");

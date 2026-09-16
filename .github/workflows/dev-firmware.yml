@@ -61,6 +61,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Same trap as release.yml: a TRACKED firmware.uf2 is restored by
+          # checkout, so "the file exists" would not mean "this build made it".
+          if git ls-files --error-unmatch .pio/build/jumperless_v5/firmware.uf2 >/dev/null 2>&1; then
+            echo "::error::.pio/build/jumperless_v5/firmware.uf2 is a TRACKED file - this would publish a stale UF2"
+            exit 1
+          fi
           if [ ! -f .pio/build/jumperless_v5/firmware.uf2 ]; then
             echo "::error::build did not produce firmware.uf2"
             exit 1

@@ -12,6 +12,7 @@
 #include "ArduinoStuff.h"
 #include "CH446Q.h"
 #include "Commands.h"
+#include "InfraPaths.h"   // infraIsBridge (connect_many want= leaves system bridges alone)
 #include "FileParsing.h"
 #include "FakeGpio.h"
 
@@ -31,6 +32,7 @@
 #include "FilesystemStuff.h" // For safe file operations
 #include "AsyncPassthrough.h" // For UART IRQ suspension during flash writes
 #include "States.h"
+#include "PathHealth.h"   // get_netlist() unrouted rule (needs States.h first)
 #include "routing/PartPlacement.h" // parts layer (place_part / list_parts bindings)
 #include "sensing/PartClassify.h"  // part_identify binding
 #include "sensing/PartMeasure.h"   // part_fingerprint binding (Tier-1 clamps)
@@ -523,11 +525,7 @@ float jl_ina_get_power( int sensor ) {
     if ( sensor == 0 ) {
         result = INA0.getPower( );
     } else if ( sensor == 1 ) {
-#if defined(OG_JUMPERLESS)
-        result = 0.0f;
-#else
-        result = INA1.getPower( );
-#endif
+        result = INA1.getPower( );   // both boards carry INA1 (OG: the DAC-side 0x41)
     }
 
     return result;
@@ -1052,6 +1050,36 @@ int jl_get_num_bridges( void ) {
     return globalState.connections.numBridges;
 }
 
+int jl_c_heap_free( void ) {
+    return (int)rp2040.getFreeHeap( );
+}
+
+// uart_stats(): (rx_overflows, rx_laps, tx_overflows, resyncs, framing_errors, overruns, rx_total, state)
+void jl_uart_stats( uint32_t* out8 ) {
+    int32_t state = 0;
+    AsyncPassthrough::getUARTRingStats( &out8[ 0 ], &out8[ 1 ], &out8[ 2 ], &out8[ 6 ], &state );
+    AsyncPassthrough::getUARTErrorStats( &out8[ 4 ], &out8[ 5 ], &out8[ 3 ] );
+    out8[ 7 ] = (uint32_t)state;
+}
+void jl_uart_send( const uint8_t* data, size_t len ) {
+    AsyncPassthrough::uartSendBlocking( data, len );
+}
+uint32_t jl_uart_ring_size( void ) {
+    return AsyncPassthrough::uartRxRingSize( );
+}
+
+// slot_stats(): (saves, backstop_saves, dirty, dirty_ms, scan_passes) - the
+// slot auto-save's counters (routing/SlotSaveGate.h) and the core-1 GPIO/ADC
+// scan counter, for the hardware playbook.
+void jl_slot_stats( uint32_t* out5 ) {
+    extern volatile uint32_t slotAutoSaveCount, slotBackstopCount, coreOneScanPasses;
+    out5[ 0 ] = slotAutoSaveCount;
+    out5[ 1 ] = slotBackstopCount;
+    out5[ 2 ] = globalState.isDirty( ) ? 1u : 0u;   // SlotManager's activeState is a reference to globalState
+    out5[ 3 ] = globalState.isDirty( ) ? (uint32_t)( millis( ) - globalState.getDirtySince( ) ) : 0u;
+    out5[ 4 ] = coreOneScanPasses;
+}
+
 // Get nodes in a net as a comma-separated string (returns static buffer)
 const char* jl_get_net_nodes( int netNum ) {
     static char nodesBuffer[ 256 ];
@@ -1235,16 +1263,22 @@ const char* jl_get_path_info( int pathIdx ) {
 }
 
 // ── Bridge scratch buffers ──────────────────────────────────────────────────
-// The three big string-returning APIs (get_all_paths / fs_read /
-// overlay_serialize) used to keep permanent function-local static buffers
-// (~12 KB of .bss on V5). Their pointer contract is only "valid until the
-// next call", so each keeps ONE lazily-allocated heap block instead,
-// released at MicroPython teardown (jl_bridge_free_scratches, called from
-// deinitMicroPythonProper). A session that never calls an API never
-// allocates its buffer. Ownership stays on this side deliberately: a
-// malloc'd return freed by the MP wrapper would leak on any mp_obj_new_*
-// MemoryError (nlr_jump skips the free).
-static char* s_allPathsScratch = nullptr;
+// The big string-returning APIs (fs_read / overlay_serialize) used to keep
+// permanent function-local static buffers (~12 KB of .bss on V5). Their
+// pointer contract is only "valid until the next call", so each keeps ONE
+// lazily-allocated heap block instead, released at MicroPython teardown
+// (jl_bridge_free_scratches, called from deinitMicroPythonProper). A session
+// that never calls an API never allocates its buffer. Ownership stays on this
+// side deliberately: a malloc'd return freed by the MP wrapper would leak on
+// any mp_obj_new_* MemoryError (nlr_jump skips the free).
+// (get_all_paths had a third one; the OG's 1 KB cut its loop at ~15 of 60
+// paths with no sign of it, so the wrapper now builds the list from
+// get_path_info(i) and that buffer is gone.)
+// NOTE the same fixed-size pattern still truncates silently: fs_read() stops
+// at kFsReadSize-1 bytes (1023 on the OG, 4095 on V5 - use open()/read for
+// bigger files) and fs_listdir's static listBuffer (768 B on the OG) omits
+// entries past its end; overlay_serialize's 256 B on the OG is enough for
+// the single overlay slot the OG keeps.
 static char* s_fsReadScratch = nullptr;
 static char* s_overlayScratch = nullptr;
 
@@ -1255,51 +1289,11 @@ static char* bridgeScratch( char** slot, size_t size ) {
 }
 
 void jl_bridge_free_scratches( void ) {
-    free( s_allPathsScratch ); s_allPathsScratch = nullptr;
+    // MicroPython teardown: a script that ended (or was killed) with the
+    // row-LED repaint held must not leave the strip frozen.
+    if ( ledRepaintHeld ) ledsFlush( );
     free( s_fsReadScratch );   s_fsReadScratch = nullptr;
     free( s_overlayScratch );  s_overlayScratch = nullptr;
-}
-
-// Get all active paths as a formatted string
-// Returns count, followed by each path on a new line
-const char* jl_get_all_path_info( void ) {
-#if defined(OG_JUMPERLESS)
-    const size_t kAllPathsSize = 1024; // RP2040: scarce SRAM, fewer paths fit
-#else
-    const size_t kAllPathsSize = 4096; // Large buffer for multiple paths
-#endif
-    char* allPathsBuffer = bridgeScratch( &s_allPathsScratch, kAllPathsSize );
-    if ( allPathsBuffer == nullptr )
-        return "0\n"; // alloc failed: report zero paths (wrapper atoi's this)
-
-    // Note: Paths should already be computed by refreshLocalConnections()
-    // We don't recompute here to avoid unnecessary overhead
-    
-    int numPaths = globalState.connections.numPaths;
-    int numBridges = globalState.connections.numBridges;
-    int pos = 0;
-    
-    Serial.print( "jl_get_all_path_info: numBridges=" );
-    Serial.print( numBridges );
-    Serial.print( ", numPaths=" );
-    Serial.println( numPaths );
-
-    // First line: number of paths
-    pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos, "%d\n", numPaths );
-
-    // Each subsequent line: path info
-    for ( int i = 0; i < numPaths && pos < (int)kAllPathsSize - 256; i++ ) {
-        const pathStruct& path = globalState.connections.paths[ i ];
-        pos += snprintf( allPathsBuffer + pos, kAllPathsSize - pos,
-                         "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
-                         path.node1, path.node2, path.net,
-                         path.chip[ 0 ], path.chip[ 1 ], path.chip[ 2 ], path.chip[ 3 ],
-                         path.x[ 0 ], path.x[ 1 ], path.x[ 2 ], path.x[ 3 ], path.x[ 4 ], path.x[ 5 ],
-                         path.y[ 0 ], path.y[ 1 ], path.y[ 2 ], path.y[ 3 ], path.y[ 4 ], path.y[ 5 ],
-                         path.duplicate );
-    }
-
-    return allPathsBuffer;
 }
 
 // Get path info for a connection between two specific nodes
@@ -1338,62 +1332,178 @@ const char* jl_get_path_between( int node1, int node2 ) {
     return pathBuffer;
 }
 
-// Node Functions
-int jl_nodes_connect( int node1, int node2, int save, int duplicates ) {
+// ── Node Functions ──────────────────────────────────────────────────────────
+// What each call guarantees on return (both boards, unchanged by `refresh`):
+//   * the netlist is updated and re-routed on core 0 (bridgesToPaths);
+//   * the crosspoint send is POSTED to core 1 (REQ_BYPASS). It completes on
+//     core 1's next free pass; the next connect/disconnect/refresh waits for
+//     it at its head before touching the path arrays, so calls never
+//     interleave on the crossbar. It is not awaited here - that is how
+//     fast_connect has always worked (Commands.cpp fastRefresh).
+// What `refresh` changes is only the row-LED repaint:
+//   * refresh=True (default): the strip repaints - connect() posts a nets
+//     show, fast_connect() leaves it to core 1's periodic nets render - and
+//     any hold a previous refresh=False left is released with one show.
+//   * refresh=False: the LEDs are HELD (ledsHold): core 1 skips its nets
+//     render, so the crosspoint send is served immediately instead of after
+//     a render, and the strip keeps its last frame until leds_flush() (or the
+//     next refresh=True call) posts ONE repaint for the whole batch.
+static void ledsAfterConnect( int refresh ) {
+    if ( refresh ) {
+        if ( ledRepaintHeld ) ledsFlush( );
+    } else {
+        ledsHold( );
+    }
+}
 
-    // Add to RAM state
+// A call that changes nothing costs nothing: connecting a pair that is
+// already a bridge (with no explicit duplicate count) or disconnecting one
+// that is not does no rebuild and posts no send - the crossbar already is
+// what the netlist says. (It used to rebuild and re-send every path, and
+// addConnection dirtied the slot, so a no-op fast_connect cost a full
+// rebuild plus an ~80 ms auto-save on the OG.)
+static bool connectIsNoop( int node1, int node2, int duplicates ) {
+    return duplicates < 0 && globalState.hasConnection( node1, node2 );
+}
+
+int jl_nodes_connect( int node1, int node2, int save, int duplicates, int refresh ) {
+    (void)save;
+    if ( connectIsNoop( node1, node2, duplicates ) ) return 1;
     // duplicates: -1 = allow, 0 = no duplicates, 1+ = allow N duplicates
-    bool ok = addBridgeToState( node1, node2, duplicates, true );
-
-    // Update shown readings to detect current sense connections
-    // This enables the marching ants animation when ISENSE_PLUS/MINUS are connected
-    //chooseShownReadings( );
-
+    // addBridgeToState(autoRefresh=true) is refreshLocalConnections(1,1,0): the
+    // same rebuild with a nets show posted. refresh=False runs it with the
+    // show left out (ledShowOption 0) - the crosspoint send is identical.
+    bool ok = addBridgeToState( node1, node2, duplicates, refresh != 0 );
+    if ( ok && !refresh ) refreshLocalConnections( 0, 1, 0 );
+    if ( ok ) ledsAfterConnect( refresh );
     return ok ? 1 : 0;   // 0 = refused (part_safety) or not added
 }
 
-int jl_nodes_disconnect( int node1, int node2 ) {
-    // Remove from RAM state
-    removeBridgeFromState( node1, node2, true );
-
-    // Update shown readings to detect current sense disconnections
-    //chooseShownReadings( );
-
+int jl_nodes_disconnect( int node1, int node2, int refresh ) {
+    // autoRefresh=true is refreshLocalConnections(-1,1,0) when something was
+    // removed (clear-first nets show); refresh=False does the same rebuild
+    // without the show, and leds_flush() posts the clear-first show later.
+    bool removed = removeBridgeFromState( node1, node2, refresh != 0 );
+    if ( !removed ) return 1;
+    if ( !refresh ) refreshLocalConnections( 0, 1, 0 );
+    ledsAfterConnect( refresh );
     return 1;
 }
 
-int jl_nodes_fast_connect( int node1, int node2, int duplicates ) {
-    // OPTIMIZATION: Fast connection with immediate refresh
-    // Uses fastRefresh() instead of full refresh for minimal latency
-    
-    // Add to RAM state
-    // duplicates: -1 = allow, 0 = no duplicates, 1+ = allow N duplicates
+int jl_nodes_fast_connect( int node1, int node2, int duplicates, int refresh ) {
+    // Fast connection: fastRefresh() (no duplicate-path fill, no colour work)
+    // posts the crosspoint send and returns; LEDs follow on core 1's own
+    // nets render unless held.
+    if ( connectIsNoop( node1, node2, duplicates ) ) return 1;
     bool ok = addBridgeToState( node1, node2, duplicates, false );
-
-    // Update shown readings to detect current sense connections
-    // chooseShownReadings( );
-    
-    // Fast refresh with immediate hardware update (bypasses Core 2 scheduler)
-    fastRefresh( 1 );  // 1 = show LEDs after refresh
-
-    return ok ? 1 : 0;
-}
-
-int jl_nodes_fast_disconnect( int node1, int node2 ) {
-    // OPTIMIZATION: Fast disconnection with immediate refresh
-    // Uses fastRefresh() instead of full refresh for minimal latency
-    
-    // Remove from RAM state
-    removeBridgeFromState( node1, node2, false );
-
-    // Update shown readings to detect current sense disconnections
-    // chooseShownReadings( );
-    
-    // Fast refresh with immediate hardware update (bypasses Core 2 scheduler)
-    fastRefresh( 1 );  // 1 = show LEDs after refresh
-
+    if ( !ok ) return 0;   // refused: nothing changed, nothing to send
+    fastRefresh( 1 );
+    ledsAfterConnect( refresh );
     return 1;
 }
+
+int jl_nodes_fast_disconnect( int node1, int node2, int refresh ) {
+    bool removed = removeBridgeFromState( node1, node2, false );
+    if ( !removed ) return 1;   // nothing to remove: nothing to send
+    fastRefresh( 1 );
+    ledsAfterConnect( refresh );
+    return 1;
+}
+
+// connect_many(): the batch primitive. Every edit lands in the netlist
+// first (addBridgeToState / removeBridgeFromState with autoRefresh=false),
+// then ONE fastRefresh routes the whole netlist and posts ONE crosspoint
+// send, and the LEDs get one show (or a hold). k edits that used to cost k
+// full rebuilds (O(k) routing each, so O(k^2) - 97 ms on-board for 24) cost
+// one. Same guarantees as fast_connect on return. Edits that change
+// nothing (pair already a bridge / not a bridge) are counted out; if nothing
+// changed there is no rebuild and no send. Returns the number of edits
+// applied; a refused connect (part_safety, invalid node) is skipped, not
+// fatal - the wrapper reports the count so a script can check it.
+static int s_batchChanged = 0;
+void jl_nodes_batch_begin( void ) { s_batchChanged = 0; }
+int jl_nodes_batch_connect( int node1, int node2, int duplicates ) {
+    if ( connectIsNoop( node1, node2, duplicates ) ) return 0;
+    bool wasBridge = globalState.hasConnection( node1, node2 );
+    if ( !addBridgeToState( node1, node2, duplicates, false ) ) return 0;
+    if ( !wasBridge || duplicates >= 0 ) s_batchChanged++;
+    return 1;
+}
+int jl_nodes_batch_disconnect( int node1, int node2 ) {
+    if ( !removeBridgeFromState( node1, node2, false ) ) return 0;
+    s_batchChanged++;
+    return 1;
+}
+int jl_nodes_batch_commit( int refresh ) {
+    if ( s_batchChanged > 0 ) {
+        fastRefresh( 1 );
+        ledsAfterConnect( refresh );
+    }
+    int n = s_batchChanged;
+    s_batchChanged = 0;
+    return n;
+}
+
+// connect_many(want=[...]): replace semantics. The requested set is diffed
+// against the bridge table (pairs are order-independent): every user bridge
+// not in `want` is removed, every `want` pair not present is added, then the
+// caller commits (one rebuild, one send). Infra (system) bridges are not the
+// user's and are left alone. `wantA/wantB` are the pairs, n <= MAX_BRIDGES.
+int jl_nodes_batch_want( const int16_t* wantA, const int16_t* wantB, int n, int duplicates ) {
+    auto wanted = [&]( int a, int b ) {
+        for ( int i = 0; i < n; i++ )
+            if ( ( wantA[ i ] == a && wantB[ i ] == b ) || ( wantA[ i ] == b && wantB[ i ] == a ) ) return true;
+        return false;
+    };
+    // removals first, from the end so the compaction never skips an entry
+    for ( int i = globalState.connections.numBridges - 1; i >= 0; i-- ) {
+        int a = globalState.connections.bridges[ i ][ 0 ];
+        int b = globalState.connections.bridges[ i ][ 1 ];
+        if ( infraIsBridge( a, b ) ) continue;
+        if ( !wanted( a, b ) ) jl_nodes_batch_disconnect( a, b );
+    }
+    for ( int i = 0; i < n; i++ ) jl_nodes_batch_connect( wantA[ i ], wantB[ i ], duplicates );
+    return s_batchChanged;
+}
+
+int jl_get_max_bridges( void ) { return MAX_BRIDGES; }
+
+// get_state() raw feeds (the string itself is built in the module, where the
+// canonical node names live - jl_get_node_name). No allocation here.
+//   jl_state_net_nodes: the member node ids of net `netNum` (0 when the net
+//   slot is unused), at most `max`.
+int jl_state_net_nodes( int netNum, int* out, int max ) {
+    if ( netNum < 0 || netNum >= MAX_NETS ) return 0;
+    const netStruct& n = globalState.connections.nets[ netNum ];
+    if ( n.number == 0 ) return 0;
+    int k = 0;
+    for ( int j = 0; j < MAX_NODES && k < max && n.nodes[ j ] != 0; j++ ) out[ k++ ] = n.nodes[ j ];
+    return k;
+}
+//   jl_state_bridge_unrouted: the crossbar-truth rule, routing/PathHealth.h
+//   (host-tested against the harness's crossbar model).
+int jl_state_bridge_unrouted( int bridgeIdx ) {
+    return pathHealthBridgeUnrouted( bridgeIdx, globalState.connections.numPaths );
+}
+//   get_path_flat(i): the 20 fields of get_path_info(i) as ints, no dict.
+int jl_state_path_flat( int pathIdx, int* out20 ) {
+    if ( pathIdx < 0 || pathIdx >= globalState.connections.numPaths ) return 0;
+    const pathStruct& p = globalState.connections.paths[ pathIdx ];
+    int k = 0;
+    out20[ k++ ] = p.node1; out20[ k++ ] = p.node2; out20[ k++ ] = p.net;
+    for ( int h = 0; h < 4; h++ ) out20[ k++ ] = p.chip[ h ];
+    for ( int h = 0; h < 6; h++ ) out20[ k++ ] = p.x[ h ];
+    for ( int h = 0; h < 6; h++ ) out20[ k++ ] = p.y[ h ];
+    out20[ k++ ] = p.duplicate;
+    return 1;
+}
+
+// leds_hold() / leds_flush() / leds_held(): the same hold, driven by hand.
+// flush always posts one nets show (held or not) and returns its generation,
+// so a script can end a batch with a known repaint.
+void jl_leds_hold( void ) { ledsHold( ); }
+int jl_leds_flush( void ) { return (int)ledsFlush( ); }
+int jl_leds_held( void ) { return ledRepaintHeld ? 1 : 0; }
 
 int jl_nodes_clear( void ) {
     // Hold core-1 frames BEFORE modifying state to prevent race conditions
@@ -1414,6 +1524,14 @@ int jl_nodes_clear( void ) {
     // waitCore2 is called internally by refreshConnections
 
     return 1;
+}
+
+// For the module's connect wrappers: does this node exist on the running
+// board? (FileParsing's isNodeValid: rows/GND always, everything else only
+// if the board descriptor's crossbar maps carry it.)
+int jl_node_is_valid( int node ) {
+    extern int isNodeValid( int node );
+    return isNodeValid( node ) == 1 ? 1 : 0;
 }
 
 int jl_nodes_is_connected( int node1, int node2 ) {

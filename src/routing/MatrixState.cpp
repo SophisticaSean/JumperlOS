@@ -156,7 +156,7 @@ static const chipStatus chipStatusInit[12] = { //this is the revision 5 chip sta
 //#endif
 
 
-int rev5plusXmap[12][16] = {
+const int rev5plusXmap[12][16] = {
     {CHIP_I, CHIP_J, CHIP_B, CHIP_B, CHIP_C, CHIP_C, CHIP_D, CHIP_D, CHIP_E, CHIP_K, CHIP_F, CHIP_F, CHIP_G, CHIP_L, CHIP_H, CHIP_H},//X MAP constant
     {CHIP_A, CHIP_A, CHIP_I, CHIP_J, CHIP_C, CHIP_C, CHIP_D, CHIP_D, CHIP_E, CHIP_E, CHIP_F, CHIP_K, CHIP_G, CHIP_G, CHIP_H, CHIP_L},
     {CHIP_A, CHIP_A, CHIP_B, CHIP_B, CHIP_I, CHIP_J, CHIP_D, CHIP_D, CHIP_E, CHIP_L, CHIP_F, CHIP_F, CHIP_G, CHIP_K, CHIP_H, CHIP_H},
@@ -171,7 +171,7 @@ int rev5plusXmap[12][16] = {
     {30, 60, ROUTABLE_BUFFER_OUT, ADC4_5V, RP_GPIO_20, RP_GPIO_21, RP_GPIO_22, RP_GPIO_23, RP_GPIO_24, RP_GPIO_25, RP_GPIO_26, RP_GPIO_27, CHIP_I, CHIP_J, CHIP_K, GND},
   };
 
-int rev4minusXmap[12][16] = {
+const int rev4minusXmap[12][16] = {
   {CHIP_I, CHIP_J, CHIP_B, CHIP_B, CHIP_C, CHIP_C, CHIP_D, CHIP_D, CHIP_E, CHIP_K, CHIP_F, CHIP_F, CHIP_G, CHIP_L, CHIP_H, CHIP_H},//X MAP constant
   {CHIP_A, CHIP_A, CHIP_I, CHIP_J, CHIP_C, CHIP_C, CHIP_D, CHIP_D, CHIP_E, CHIP_E, CHIP_F, CHIP_K, CHIP_G, CHIP_G, CHIP_H, CHIP_L},
   {CHIP_A, CHIP_A, CHIP_B, CHIP_B, CHIP_I, CHIP_J, CHIP_D, CHIP_D, CHIP_E, CHIP_L, CHIP_F, CHIP_F, CHIP_G, CHIP_K, CHIP_H, CHIP_H},
@@ -195,7 +195,7 @@ int rev4minusXmap[12][16] = {
 // (RouteSafety.cpp), so "DK" != G's "DG1" silently discarded D's x13<->G x7
 // lane pair - halving chip D's G-lane options in exactly the starved fabric
 // that produced the vf noroute (invest-vf-noroute.md §7).
-const char* connectionNamesX[12][16] = {
+const char* const connectionNamesX[12][16] = {
   { "AI",  "AJ",  "AB0", "AB1", "AC0",  "AC1",  "AD0",  "AD1",  "AE0",  "AK",   "AF0",  "AF1",  "AG0",  "AL",   "AH0",  "AH1"  }, // A
   { "AB0", "AB1", "BI",  "BJ",  "BC0",  "BC1",  "BD0",  "BD1",  "BE0",  "BE1",  "BF0",  "BK",   "BG0",  "BG1",  "BH0",  "BL"   }, // B
   { "AC0", "AC1", "BC0", "BC1", "CI",   "CJ",   "CD0",  "CD1",  "CE0",  "CL",   "CF0",  "CF1",  "CG0",  "CK",   "CH0",  "CH1"  }, // C
@@ -211,7 +211,7 @@ const char* connectionNamesX[12][16] = {
   { "30",  "60",  "BFo",  "5V", "GP1",  "GP2",  "GP3",  "GP4",  "GP5",  "GP6",  "GP7",  "GP8",  "LI",   "LJ",   "LK",   "GND"  }  // L
   };
 
-const char* connectionNamesY[12][8] = {
+const char* const connectionNamesY[12][8] = {
   { "u", "1",  "2",  "3",  "4",  "5",  "6",  "7"  },  // A
   { "u", "8",  "9",  "10", "11", "12", "13", "14" },  // B
   { "u", "15", "16", "17", "18", "19", "20", "21" },  // C
@@ -279,7 +279,7 @@ char* xName(int chip, int x) {
 
 
 
-  struct nodeStruct nodeNames[30] = {
+  const struct nodeStruct nodeNames[30] = {
     {"gnd", GND}, {"top_rail", TOP_RAIL}, {"bot_rail", BOTTOM_RAIL}, {"dac_0", DAC0}, {"dac_1", DAC1}, 
     {"isense_p", ISENSE_PLUS}, {"isense_n", ISENSE_MINUS}, {"buf_in", ROUTABLE_BUFFER_IN}, {"buf_out", ROUTABLE_BUFFER_OUT}, 
     {"adc_0", ADC0}, {"adc_1", ADC1}, {"adc_2", ADC2}, {"adc_3", ADC3}, {"adc_4", ADC4}, {"probe", ADC7_PROBE}, 
@@ -353,7 +353,7 @@ int columnWidth = 16;
   }
 
 
-int globalDoNotIntersects[60][2] = {
+const int globalDoNotIntersects[60][2] = {
   {GND, TOP_RAIL},
   {GND, BOTTOM_RAIL},
   {GND, DAC1},
@@ -527,7 +527,7 @@ struct nanoStatus nano = {  //there's only one of these so ill declare and inita
   };
 
 
-SFmapPair sfMappings[100] = {
+const SFmapPair sfMappings[100] = {
     {"GND", 100},
     {"GROUND", 100},
     {"SUPPLY_5V", 105},
@@ -626,6 +626,9 @@ SFmapPair sfMappings[100] = {
 
 // Initialize nets and chip status from static data
 void initNets(void) {
+  // Every net is reinitialised below, so every per-net bridge list is
+  // dropped with it: reset the shared pool first (no-op on V5).
+  netbridges::resetAll();
   // Copy special function nets from static data to globalState
   for (int i = 0; i < 6; i++) {
     globalState.connections.nets[i] = specialFunctionNetsInit[i];

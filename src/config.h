@@ -226,7 +226,9 @@
   X(debug, net_voltage_scan, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG | JLC_SHOW_MEASURE, \
     "Print net voltage scan stats once a second: node voltages and per-path currents.") \
   X(debug, net_scan_pair_taps, INT, 1, 0, 1, 1, nullptr, HOOK_NONE, JLC_DEBUG | JLC_SHOW_MEASURE, \
-    "Tap both ends of a routed path at once on two ADCs (1, default) or sequentially (0).")
+    "Tap both ends of a routed path at once on two ADCs (1, default) or sequentially (0).") \
+  X(debug, repl_timing, BOOL, false, 0, 0, 0, nullptr, HOOK_NONE, JLC_DEBUG, \
+    "Print one timeline line per raw-REPL exec: reply flushed -> on the wire, core 1 render, auto-save (tubes/ReplTiming.cpp).")
 
 // --- [routing] -------------------------------------------------------------
 #define JL_CFG_ROUTING(X) \

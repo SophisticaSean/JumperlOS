@@ -27,11 +27,11 @@ extern bool debugNMtime;
 extern int8_t nodeToNetIndex[256];
 void buildNodeToNetIndex();  // Build the index after nets are regenerated
 
-extern const char *defNanoToCharShort[35];
-extern const char *defSpecialToCharShort[49];
+extern const char * const defNanoToCharShort[35];
+extern const char * const defSpecialToCharShort[49];
 
-extern const char *defNanoToCharLong[35];
-extern const char *defSpecialToCharLong[49];
+extern const char * const defNanoToCharLong[35];
+extern const char * const defSpecialToCharLong[49];
 extern const char *emptyNet[];
 
 // Arrays of DefineInfo structs

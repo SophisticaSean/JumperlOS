@@ -272,9 +272,12 @@ static bool componentHasShort(WireUF& uf, int* outNetA = nullptr,
     int16_t* rootNet = rootNetBuf[core];
     int16_t (*rootNodes)[8] = rootNodesBuf[core];
     uint8_t* rootNodeCount = rootNodeCountBuf[core];
-    memset(rootDriven, 0xFF, sizeof(rootDrivenBuf[0]));
-    memset(rootNet, 0xFF, sizeof(rootNetBuf[0]));
-    memset(rootNodeCount, 0, sizeof(rootNodeCountBuf[0]));
+    // Only the first numWires entries are ever read (the loop below bounds on
+    // it), and numWires is ~100-200 against kMaxWires 288: clearing the whole
+    // buffer was 1 440 B per path, per call.
+    memset(rootDriven, 0xFF, numWires * sizeof(rootDriven[0]));
+    memset(rootNet, 0xFF, numWires * sizeof(rootNet[0]));
+    memset(rootNodeCount, 0, numWires * sizeof(rootNodeCount[0]));
 
     for (int w = 0; w < numWires; w++) {
         int node = wireNode[w];
@@ -377,31 +380,74 @@ bool wouldShortCrosspointMasked(int chip, int x, int y, int clearChip,
     return componentHasShort(uf);
 }
 
-static bool isFakeGpioInputPath(int pathIdx) {
-    int pathNode1 = globalState.connections.paths[pathIdx].node1;
-    int pathNode2 = globalState.connections.paths[pathIdx].node2;
-    for (int b = 0; b < globalState.connections.numBridges; b++) {
-        int b1 = globalState.connections.bridges[b][0];
-        int b2 = globalState.connections.bridges[b][1];
-        if ((b1 == pathNode1 || b1 == pathNode2) && IS_FAKE_GP_IN(b2)) return true;
-        if ((b2 == pathNode1 || b2 == pathNode2) && IS_FAKE_GP_IN(b1)) return true;
-    }
-    return false;
-}
+// The nodes that share a bridge with a FAKE_GP_IN node. Collected ONCE per
+// validateAllPaths instead of rescanning the whole bridge table per path -
+// that scan was O(paths x bridges) (~15 000 iterations at 60 rows) and ran
+// before any union-find work.
+struct FakeGpioPartners {
+    // One entry per bridge is the exact bound (a FAKE_GP_IN node can be
+    // bridged more than once, so MAX_FAKE_GP_IN is not).
+    int16_t node[MAX_BRIDGES];
+    int n = 0;
 
-int validateAllPaths(void) {
+    void collect() {
+        n = 0;
+        for (int b = 0; b < globalState.connections.numBridges && b < MAX_BRIDGES; b++) {
+            int b1 = globalState.connections.bridges[b][0];
+            int b2 = globalState.connections.bridges[b][1];
+            if (IS_FAKE_GP_IN(b2)) node[n++] = (int16_t)b1;
+            else if (IS_FAKE_GP_IN(b1)) node[n++] = (int16_t)b2;
+        }
+    }
+
+    bool covers(int node1, int node2) const {
+        for (int i = 0; i < n; i++) {
+            if (node[i] == node1 || node[i] == node2) return true;
+        }
+        return false;
+    }
+};
+
+// validateAllPaths, two ways. The accumulator `accepted[]` only ever GROWS, so
+// the union-find can be built once and each candidate's <= 4 hops united into
+// it - instead of reset(numWires) + unionFromBitfield (<= 1 536 bit tests) per
+// path. Measured on a V5 at 30 GND rows: validation was 13 477 us of a
+// 20 461 us bridgesToPaths (66%), the largest phase by far.
+//
+// A rejected path must leave NO trace, and that is the whole subtlety: find()
+// path-compresses (parent[a] = parent[parent[a]]) and componentHasShort calls
+// find() for EVERY wire after the candidate's hops are united, so wires all
+// over the merged component end up pointing at the surviving root. A two-word
+// undo of (parent[b], sz[a]) would leave them there - silently, and it can
+// both hide a real short and invent one. So the snapshot is the whole state:
+// two int16_t[288] = 1 152 B memcpy'd before the union and restored only on
+// reject, which is bit-identical by construction and still deletes the
+// per-path rebuild.
+//
+// `persistent` is false in the differential host test (ROUTE_SAFETY_DIFFTEST),
+// which drives both implementations over the same path sets and compares the
+// `found` count and the whole p.skip vector, trial by trial - the sweeps alone
+// cannot do that job: they produce 0 shorts, so the reject branch never runs.
+static int validateAllPathsImpl(bool persistent) {
     if (!wireTableReady) return 0;
 
     chipXYBitfield accepted[12];
     memset(accepted, 0, sizeof(accepted));
     int found = 0;
 
+    FakeGpioPartners fakeGpio;
+    fakeGpio.collect();
+
+    WireUF live;               // the persistent accumulator
+    WireUF snapshot;           // its state before the candidate's hops
+    if (persistent) live.reset(numWires);
+
     for (int i = 0; i < numberOfPaths; i++) {
         pathStruct& p = globalState.connections.paths[i];
         if (p.skip || p.net <= 0) continue;
         if (p.pathType == VIRTUAL) continue;
         // TDM manages these; simultaneous presence in paths[] is intentional.
-        if (isFakeGpioInputPath(i)) continue;
+        if (fakeGpio.n > 0 && fakeGpio.covers(p.node1, p.node2)) continue;
 
         int8_t hc[4], hx[4], hy[4];
         int nHops = 0;
@@ -414,13 +460,24 @@ int validateAllPaths(void) {
         }
         if (nHops == 0) continue;
 
-        WireUF uf;
-        uf.reset(numWires);
-        unionFromBitfield(uf, accepted);
-        unionHops(uf, hc, hx, hy, nHops);
+        WireUF rebuilt;
+        if (persistent) {
+            memcpy(snapshot.parent, live.parent, numWires * sizeof(live.parent[0]));
+            memcpy(snapshot.sz, live.sz, numWires * sizeof(live.sz[0]));
+            unionHops(live, hc, hx, hy, nHops);
+        } else {
+            rebuilt.reset(numWires);
+            unionFromBitfield(rebuilt, accepted);
+            unionHops(rebuilt, hc, hx, hy, nHops);
+        }
+        WireUF& uf = persistent ? live : rebuilt;
 
         int netA = -1, netB = -1;
         if (componentHasShort(uf, &netA, &netB)) {
+            if (persistent) {   // the candidate leaves no trace, path compression included
+                memcpy(live.parent, snapshot.parent, numWires * sizeof(live.parent[0]));
+                memcpy(live.sz, snapshot.sz, numWires * sizeof(live.sz[0]));
+            }
             p.skip = true;
             if (numberOfUnconnectablePaths < 10) {
                 unconnectablePaths[numberOfUnconnectablePaths][0] = p.node1;
@@ -455,6 +512,21 @@ int validateAllPaths(void) {
     }
     return found;
 }
+
+#ifdef ROUTE_SAFETY_DIFFTEST
+// Host differential test only (the router harness defines this): route the same
+// netlist twice, once each way, and compare the p.skip vectors. routeSafetyFound
+// makes the reject branch's coverage visible instead of assumed.
+bool routeSafetyPersistent = true;
+long routeSafetyFound = 0;
+int validateAllPaths(void) {
+    int n = validateAllPathsImpl(routeSafetyPersistent);
+    routeSafetyFound += n;
+    return n;
+}
+#else
+int validateAllPaths(void) { return validateAllPathsImpl(true); }
+#endif
 
 // ============================================================================
 // Suspect / generation

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "States.h"
+#include "SlotSaveGate.h"
 #include "MatrixState.h"
 #include "NetManager.h"
 #include "FileParsing.h"
@@ -22,18 +23,20 @@
 #include "FileCache.h"  // fileCacheFlushNowAll() big-event triggers
 #include "Undo.h"  // Phase 4.1 - undo log mutation hooks
 #include "InfraPaths.h"  // infraIsBridge / infraScrubLoadedBridges / system allowance
+#include "ReplTiming.h"  // debug.repl_timing auto-save stamps
 
 // ============================================================================
 // CRITICAL MEMORY SAFETY NOTES
 // ============================================================================
 //
-// JumperlessState and ConnectionState contain MASSIVE arrays:
-//   - bridges[192][3]        = 2,304 bytes
-//   - bridgeColors[192]      = 768 bytes
-//   - nets[60]               = ~30 KB (depends on netStruct size)
-//   - paths[192]             = ~20 KB (depends on pathStruct size)
+// JumperlessState and ConnectionState contain MASSIVE arrays (V5 / OG):
+//   - bridges[MAX_BRIDGES][3]   = 768 / 432 bytes
+//   - bridgeColors[MAX_BRIDGES] = 512 / 288 bytes
+//   - nets[60]                  = ~11.8 KB / 6.2 KB (netStruct 196 / 104 B)
+//   - paths[MAX_BRIDGES]        = ~16 KB / 2.9 KB (pathStruct 128 / 40 B)
 //   
-// TOTAL SIZE: ~50+ KB per JumperlessState instance!
+// TOTAL SIZE: ~40 KB (V5) / ~19 KB (OG) per JumperlessState instance!
+// (The OG figures are the 2026-09-11 narrowed layout - see JumperlessDefines.h.)
 //
 // **NEVER COPY THESE OBJECTS!**
 //   - Copying exhausts limited stack memory on embedded systems
@@ -67,6 +70,9 @@ String booleanToString(bool value);
 
 // Global singleton - THE single source of truth for all Jumperless state
 JumperlessState globalState;
+// The shared per-net bridge pool (routing/NetBridges.h); belongs to
+// globalState.connections, kept outside it so the header stays Arduino-free.
+NetBridgePool netBridgePool;
 
 // Set custom net name - stored by NET NUMBER in DisplayState
 // Pass empty string or nullptr to clear
@@ -115,10 +121,12 @@ void ConnectionState::clear() {
     chipStatesCacheValid = false;
     clearAllNTCC();
 
-    // Clear nets
+    // Clear nets (every per-net bridge list goes with them: reset the pool
+    // rather than leak the entries whose headers this memset erases)
     for (int i = 0; i < MAX_NETS; i++) {
         memset(&nets[i], 0, sizeof(netStruct));
     }
+    netbridges::resetAll();
     
     // Clear paths
     memset(paths, 0, sizeof(paths));
@@ -126,7 +134,6 @@ void ConnectionState::clear() {
     // Clear chip states
     for (int i = 0; i < 12; i++) {
         memset(&chipStates[i], 0, sizeof(chipStatus));
-        memset(&chipXY[i], 0, sizeof(struct justXY));
     }
 
     // Restore locked connections after all state has been reset.
@@ -579,6 +586,7 @@ void JumperlessState::markDirty() {
         void* caller = __builtin_return_address(0);
         Serial.printf("  Caller address: %p\n", caller);
     }
+    if (!dirty) dirtySinceMs = millis();   // the clean->dirty edge, for the auto-save backstop
     dirty = true;
     lastModifiedTime = millis();
 }
@@ -589,6 +597,7 @@ void JumperlessState::clearDirty() {
                      millis(), millis() - lastModifiedTime);
     }
     dirty = false;
+    dirtySinceMs = 0;
 }
 
 // Connection management
@@ -620,11 +629,17 @@ bool JumperlessState::addConnection(int node1, int node2, String& errorMsg, int 
             // touching an existing pair with the probe silently spent another
             // lane on it - and now that -1 means "default", an increment would
             // have turned a default into an explicit 0.
-            if (duplicates >= 0) {
+            // Nothing changed unless the count did: a plain re-add must not
+            // dirty the slot. It did, and every dirty mark is a slot
+            // auto-save the moment the board looks idle - toYAML + a FatFS
+            // write + a flash erase/program with interrupts masked, ~80 ms
+            // on the OG during which USB is not serviced. A fixture calling
+            // fast_connect on existing bridges paid that on every reply.
+            if (duplicates >= 0 && connections.bridges[i][2] != duplicates) {
                 connections.bridges[i][2] = duplicates;
+                connections.invalidateCache(config.autoRefreshOnChange);
+                markDirty();
             }
-            connections.invalidateCache(config.autoRefreshOnChange);
-            markDirty();
             return true;
         }
     }
@@ -4688,6 +4703,11 @@ void printStateBackupInfo(void) {
  * 
  * This enables live updates when host edits files while preventing corruption.
  */
+// Auto-save counters for jumperless.slot_stats(): total saves this boot and
+// how many of them the backstop (not the quiet window) let through.
+volatile uint32_t slotAutoSaveCount = 0;
+volatile uint32_t slotBackstopCount = 0;
+
 ServiceStatus SlotManager::service() {
     // return ServiceStatus::IDLE; //< this isn't the problem, not running slot manager service still freezes
     //return ServiceStatus::IDLE;
@@ -4851,11 +4871,14 @@ ServiceStatus SlotManager::service() {
     extern volatile bool refreshLocalInProgress;
     extern volatile bool core1busy;
 
-    // GATING NEW MODEL:
-    //   - Drop the old "2000ms since last mutation" debounce. The user's
-    //     window of unsaved work is now bounded by the cache flush gate
-    //     (systemIdleForFlush + 60s emergency backstop) instead of a
-    //     fixed timer.
+    // GATING MODEL:
+    //   - No "2000ms since last mutation" debounce. The save waits for a
+    //     quiet window (systemIdleForFlush, 750 ms since the last user
+    //     input - raw-REPL batches count) and, once the slot has been dirty
+    //     for SLOT_SAVE_BACKSTOP_MS, for the next service pass regardless
+    //     of input cadence (routing/SlotSaveGate.h). FileCache's 60 s
+    //     emergency backstop covers cache entries only - the slot is not in
+    //     the cache until this save serialises it, so it needs its own.
     //   - Defer toYAML + cache write to genuine idle. toYAML is ~ms of
     //     CPU work on Core 0; running it on every dirty tick during a
     //     probe burst is wasted effort because we'd just re-serialize
@@ -4878,8 +4901,12 @@ ServiceStatus SlotManager::service() {
             Serial.print(activeSlotPath);
             Serial.println(" is a project template and is not written back)");
         }
-    } else if (hasDirtyState && systemIdleForFlush() && !refreshLocalInProgress && !core1busy) {
+    } else if (hasDirtyState &&
+               systemIdleForFlush(slotSaveQuietMs(millis() - activeState.getDirtySince(), SLOT_SAVE_BACKSTOP_MS)) &&
+               !refreshLocalInProgress && !core1busy) {
             slowReason = "auto-save";
+            slotAutoSaveCount++;
+            if (millis() - activeState.getDirtySince() > SLOT_SAVE_BACKSTOP_MS) slotBackstopCount++;
             unsigned long saveStart = micros();
 
             if (debugWaitLoopTiming) {
@@ -4899,7 +4926,10 @@ ServiceStatus SlotManager::service() {
             // of writing them into whatever number happened to be tracked.
             // Skip validation on auto-save (state is validated when connections are added/removed)
             static unsigned long lastAutoSaveFailPrint = 0;
-            if (saveActiveSlot(errorMsg, true)) {
+            replt::saveStart();   // debug.repl_timing
+            bool autoSaved = saveActiveSlot(errorMsg, true);
+            replt::saveEnd();
+            if (autoSaved) {
                 lastAutoSaveFailPrint = 0;   // next failure prints immediately
                 unsigned long saveTime = micros() - saveStart;
                 if (debugWaitLoopTiming) {

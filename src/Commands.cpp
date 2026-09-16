@@ -102,6 +102,33 @@ bool ledShowIdle( void ) {
   return core1req::idle( core1req::REQ_SHOW_LEDS ) && !s_ledGfxOwned;
 }
 
+// ── Deferred row-LED repaint (leds_hold / leds_flush, connect(refresh=False))
+// A connect that lands while core 1 is inside its nets render (showNets +
+// readGPIO + measurements + leds.show, one pass per scheduler tick) has its
+// crosspoint send served only when that pass ends, and the NEXT rebuild's
+// head wait (refreshLocalConnections / fastRefresh) then waits for that send:
+// per back-to-back connect, one render's worth of latency. While the hold is
+// up core 1's LED branch skips the nets render (a menu/graphics flush still
+// runs - it is interactive), so a posted send is served on the next loop1
+// pass. Nothing becomes asynchronous: the send still goes through the
+// mailbox, the head wait still waits for it, and the strip simply keeps its
+// last frame until ledsFlush() posts the one repaint for the whole batch.
+// Core 0 writes, core 1 reads; a bool, no ordering beyond the __dmb.
+volatile bool ledRepaintHeld = false;
+
+void ledsHold( void ) {
+  ledRepaintHeld = true;
+  __dmb( );
+}
+
+uint32_t ledsFlush( void ) {
+  ledRepaintHeld = false;
+  __dmb( );
+  // One clear-first nets render (what a disconnect posts: rows that left
+  // every net go dark), async like every other show.
+  return requestLedShow( -1 );
+}
+
 bool ledGraphicsOwned( void ) { return s_ledGfxOwned; }
 
 uint32_t ledShowPendingBits( void ) {
@@ -598,7 +625,9 @@ void fastRefresh(int ledShowOption) {
   refreshLocalInProgress = true;
   
   // Performance profiling (set PROFILE_FAST_REFRESH = 1 to enable)
-  #define PROFILE_FAST_REFRESH 0
+  #ifndef PROFILE_FAST_REFRESH
+  #define PROFILE_FAST_REFRESH 0   // -DPROFILE_FAST_REFRESH=1 from the build to turn it on
+  #endif
   unsigned long startTime = micros();
   unsigned long stepTime = startTime;
   

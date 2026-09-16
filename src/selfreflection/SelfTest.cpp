@@ -71,7 +71,7 @@ static const char* SELFTEST_OVERLAY_NAME = "_SELFTEST_";
 // The OG has no crossbar-routable buffer, single-LED rows, and a different
 // analog front end - none of this test suite applies.
 void runFullSelfTest( bool ) { Serial.println( "Self test is not supported on Jumperless OG." ); }
-void selfTestWaitForInput( const char* ) { }
+bool selfTestWaitForInput( const char*, unsigned long ) { return true; }   // "input arrived": the OG keeps today's path
 void selfTestClearOverlay( void ) { }
 void selfTestWaitForInputThenReset( void ) { rp2040.restart( ); }
 void probeCableTestApp( void ) { runFullSelfTest( false ); }
@@ -81,6 +81,7 @@ void psramTestApp( void ) { runFullSelfTest( false ); }
 void fullSelfTestApp( void ) { runFullSelfTest( false ); }
 void selfTestPrintStoredReport( void ) { Serial.println( "::SELFTEST::none::END::" ); }
 void selfTestShowSavedResultIfPending( void ) { }
+bool selfTestStoredHardFailure( void ) { return false; }   // no self test on the OG
 
 #else // V5 implementation
 
@@ -1261,6 +1262,38 @@ static bool selfTestRetryCountdownAborted( int seconds ) {
     return false;
 }
 
+// A failing self test is only safe to boot past when the failure is confined to
+// the probe (no cable attached is the normal headless case). A crossbar,
+// tip-voltage, PSRAM or peripheral failure means the board cannot be trusted to
+// drive the breadboard: the caller parks the DACs and leaves the netlist alone.
+// Reads the persisted report, so it also answers on the boot AFTER first start.
+static bool selfTestHardFailure( const SelfTestReport& r ) {
+    for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
+        if ( r.status[ i ] == SELFTEST_FAIL && strcmp( selfTestNames[ i ], "probe_cable" ) != 0 )
+            return true;
+    }
+    return false;
+}
+
+// "<name>":"fail" in the stored JSON, for any test but probe_cable.
+bool selfTestStoredHardFailure( void ) {
+    if ( !safeFileExists( SELFTEST_JSON_PATH ) )
+        return false;
+    File f = safeFileOpen( SELFTEST_JSON_PATH, "r" );
+    if ( !f )
+        return false;
+    String json = f.readString( );
+    safeFileClose( f, false );
+    for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
+        if ( strcmp( selfTestNames[ i ], "probe_cable" ) == 0 )
+            continue;
+        String needle = String( "\"" ) + selfTestNames[ i ] + "\":\"fail\"";
+        if ( json.indexOf( needle ) >= 0 )
+            return true;
+    }
+    return false;
+}
+
 void runFullSelfTest( bool fromFirstStart ) {
     SelfTestReport r;
     initReport( r );
@@ -1277,8 +1310,13 @@ void runFullSelfTest( bool fromFirstStart ) {
     // round (the operator reseats the cable / fixes the fixture between
     // rounds; passed results are kept). Any input during the countdown
     // accepts the failing report instead of looping forever.
+    // Bounded: a headless board (mass flashing, usbip, CI) has nobody to press
+    // a key, and every failing round costs a full session + a 5 s countdown.
+    // The pass condition stays in the loop test - a `for` would run one extra
+    // round with an all-false mask on a board that already passed.
+    static const int kSelfTestMaxRounds = 3;   // the initial run + 2 retries
     int round = 2;
-    while ( !reportOverallPass( r ) ) {
+    while ( !reportOverallPass( r ) && round <= kSelfTestMaxRounds ) {
         bool mask[ SELFTEST_NUM_TESTS ];
         char failed[ 64 ] = "";
         for ( int i = 0; i < SELFTEST_NUM_TESTS; i++ ) {
@@ -1304,6 +1342,19 @@ void runFullSelfTest( bool fromFirstStart ) {
         round++;
     }
 
+    if ( !reportOverallPass( r ) ) {
+        Serial.println( "\n\rRetry limit reached - keeping the failing report." );
+    }
+    if ( selfTestHardFailure( r ) ) {
+        // The teardown in runSelfTestSession re-applies the SAVED rail voltages
+        // (setRailsAndDACs) - do not leave a board that just failed its own
+        // crossbar/tip-voltage/PSRAM test driving the breadboard.
+        Serial.println( "\n\rSelf test failed beyond the probe - parking DAC0..3 at 0 V." );
+        for ( int d = 0; d <= 3; d++ )
+            setDacByNumber( d, 0.0f, 0 );
+        oledStatus( "Test FAIL - DACs 0" );
+    }
+
     // Persist the final accumulated report (pass or operator-aborted fail).
     String json = selfTestToJson( r );
     writeTextFile( SELFTEST_JSON_PATH, json );
@@ -1326,7 +1377,9 @@ void runFullSelfTest( bool fromFirstStart ) {
 }
 
 // Block until any human input: probe button, encoder click/turn, or a serial byte.
-static void waitForAnyInput( void ) {
+// Returns true when a human touched something, false when timeoutMs elapsed
+// (0 = wait forever, which is what every manual caller wants).
+static bool waitForAnyInput( unsigned long timeoutMs = 0 ) {
     // Swallow whatever input state got us here
     encoderButtonState = IDLE;
     encoderDirectionState = NONE;
@@ -1335,26 +1388,29 @@ static void waitForAnyInput( void ) {
     }
     delay( 300 ); // let a button held from earlier be released
 
+    unsigned long start = millis( );
     while ( true ) {
         if ( probing.checkProbeButtonState( ) != 0 )
-            break;
+            return true;
         if ( encoderButtonState != IDLE || isEncoderButtonPhysicallyPressed( ) )
-            break;
+            return true;
         if ( encoderDirectionState != NONE )
-            break;
+            return true;
         if ( Serial.available( ) > 0 )
-            break;
+            return true;
+        if ( timeoutMs && ( millis( ) - start ) >= timeoutMs )
+            return false;
         delay( 10 );
     }
 }
 
-void selfTestWaitForInput( const char* nextWhat ) {
+bool selfTestWaitForInput( const char* nextWhat, unsigned long timeoutMs ) {
     Serial.println( "\n\rResults are showing on the breadboard LEDs." );
     Serial.printf( "Touch a probe button, click or turn the encoder, or send any\n\r"
                    "serial byte to %s.\n\r", nextWhat );
     Serial.flush( );
 
-    waitForAnyInput( );
+    return waitForAnyInput( timeoutMs );
 }
 
 void selfTestClearOverlay( void ) {

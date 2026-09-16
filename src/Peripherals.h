@@ -198,6 +198,12 @@ int waveGen(void);
 void GetAdc29Status(int i);
 
 float readAdcVoltage(int channel, int samples = 8);
+// OG (BoardCaps::spiDac) analog constants: (re)load adcSpread/adcZero and
+// dacSpread/dacZero from the board descriptor + the detected DAC part. The
+// config file's [calibration] block is not applied on the OG (Peripherals.cpp).
+void ogApplyBoardCalibration(void);
+const char* ogDacBackendName(void);   // "2x MCP4725 (I2C, rev 2)" / "MCP4822 (SPI, rev 3)" / "none detected"
+int ogDacBackendKind(void);           // ogAnalog::DacKind
 int readAdc(int channel, int samples = 8);
 
 void chooseShownReadings(void);
