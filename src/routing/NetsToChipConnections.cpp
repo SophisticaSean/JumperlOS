@@ -2377,10 +2377,22 @@ void bridgesToPaths(
     Serial.println(")");
   }
 
-  // Performance profiling (matches PROFILE_FAST_REFRESH in Commands.cpp)
+  // Performance profiling (matches PROFILE_FAST_REFRESH in Commands.cpp).
+  // Settable from the build without editing this file:
+  //   PLATFORMIO_BUILD_FLAGS="-DPROFILE_BRIDGES_TO_PATHS=1" pio run -e jumperless_v5
+  #ifndef PROFILE_BRIDGES_TO_PATHS
   #define PROFILE_BRIDGES_TO_PATHS 0
+  #endif
   unsigned long btp_start = micros();
   unsigned long btp_step = btp_start;
+  #if PROFILE_BRIDGES_TO_PATHS
+  // The phase lines are BUFFERED: printing them inline over USB CDC costs tens
+  // of microseconds each (unbounded if the host is not draining), and the total
+  // below is stamped from btp_start - it would measure its own reporting.
+  struct { const char* name; unsigned long us; } btp_ph[ 12 ];
+  int btp_np = 0;
+  #define BTP_PHASE(nm) do { if (btp_np < 12) { btp_ph[btp_np].name = (nm); btp_ph[btp_np].us = micros() - btp_step; btp_np++; } btp_step = micros(); } while (0)
+  #endif
 
   // Only clear pathsWithCandidates if starting from 0
   if (startIndex == 0) {
@@ -2396,8 +2408,7 @@ void bridgesToPaths(
   if (startIndex == 0) {
     sortPathsByNet();
     #if PROFILE_BRIDGES_TO_PATHS
-    Serial.print("  sortPathsByNet: "); Serial.print(micros() - btp_step); Serial.println(" us");
-    btp_step = micros();
+    BTP_PHASE("sortPathsByNet");
     #endif
     
     // TDM OPTIMIZATION: Merge all fake GPIO input paths into a single net
@@ -2492,23 +2503,20 @@ void bridgesToPaths(
   }
 
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  path analysis loop: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("path analysis loop");
   #endif
 
   // Only resort if starting from beginning (sorting is global and breaks incremental)
   if (startIndex == 0) {
     sortAllChipsLeastToMostCrowded();
     #if PROFILE_BRIDGES_TO_PATHS
-    Serial.print("  sortAllChipsLeastToMostCrowded: "); Serial.print(micros() - btp_step); Serial.println(" us");
-    btp_step = micros();
+    BTP_PHASE("sortAllChipsLeastToMostCrowded");
     #endif
   }
 
   resolveChipCandidates(startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  resolveChipCandidates: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("resolveChipCandidates");
   #endif
 
   // Primary pass under the chip-K y-row budget (see kRowBudgetRefuses)
@@ -2517,20 +2525,17 @@ void bridgesToPaths(
 
   commitPaths(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  commitPaths: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("commitPaths");
   #endif
 
   resolveAltPaths(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  resolveAltPaths: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("resolveAltPaths");
   #endif
   
   resolveUncommittedHops(2, -1, 0, startIndex);
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  resolveUncommittedHops: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("resolveUncommittedHops");
   #endif
 
   kRowBudgetActive = false;
@@ -2557,8 +2562,7 @@ void bridgesToPaths(
       resolveUncommittedHops(2, -1, 0, startIndex);
       kRowRescuePass = false;
       #if PROFILE_BRIDGES_TO_PATHS
-      Serial.print("  K-row rescue pass: "); Serial.print(micros() - btp_step); Serial.println(" us");
-      btp_step = micros();
+      BTP_PHASE("K-row rescue pass");
       #endif
     }
   }
@@ -2625,8 +2629,7 @@ void bridgesToPaths(
   checkForOverlappingPaths();
   validateAllPaths();
   #if PROFILE_BRIDGES_TO_PATHS
-  Serial.print("  validation: "); Serial.print(micros() - btp_step); Serial.println(" us");
-  btp_step = micros();
+  BTP_PHASE("validation");
   #endif
 
   //   printPathsCompact(2 );
@@ -2661,7 +2664,12 @@ void bridgesToPaths(
 
   #if PROFILE_BRIDGES_TO_PATHS
   unsigned long btp_total = micros() - btp_start;
+  for (int i = 0; i < btp_np; i++) {
+    Serial.print("  "); Serial.print(btp_ph[i].name); Serial.print(": ");
+    Serial.print(btp_ph[i].us); Serial.println(" us");
+  }
   Serial.print("  bridgesToPaths TOTAL: "); Serial.print(btp_total); Serial.println(" us");
+  #undef BTP_PHASE
   #endif
   
   // Update live crossbar display if enabled

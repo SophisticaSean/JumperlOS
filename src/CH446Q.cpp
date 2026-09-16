@@ -715,7 +715,9 @@ void initCH446Q(void) {
 // This causes unpredictable slowdowns. Running Core 2 from RAM eliminates this issue.
 void __not_in_flash_func(sendPaths)(int clean, int reqSlot, uint32_t reqGen) {
   // Performance profiling (matches PROFILE_FAST_REFRESH in Commands.cpp)
-  #define PROFILE_CORE2_SENDPATHS 0
+  #ifndef PROFILE_CORE2_SENDPATHS
+  #define PROFILE_CORE2_SENDPATHS 0   // -DPROFILE_CORE2_SENDPATHS=1 from the build to turn it on
+  #endif
   unsigned long core2_start = micros();
   unsigned long core2_step = core2_start;
 
@@ -796,7 +798,9 @@ void __not_in_flash_func(refreshPaths)(void) {
 
 // CRITICAL: Run from RAM to prevent XIP flash cache contention
 void __not_in_flash_func(sendAllPaths)(int clean) {
-  #define PROFILE_SENDALLPATHS 0
+  #ifndef PROFILE_SENDALLPATHS
+  #define PROFILE_SENDALLPATHS 0   // -DPROFILE_SENDALLPATHS=1 from the build to turn it on
+  #endif
   unsigned long startTime = micros();
   unsigned long stepTime = startTime;
 

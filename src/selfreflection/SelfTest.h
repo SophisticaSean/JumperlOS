@@ -43,6 +43,11 @@ struct SelfTestReport {
 // interactive probe pad calibration, wipes the undo history, then resets.
 void runFullSelfTest( bool fromFirstStart );
 
+// True when the persisted report has a FAIL in anything but probe_cable, i.e.
+// the board should not be trusted to drive the breadboard. Boot reads this to
+// park the DACs and skip re-applying the saved netlist.
+bool selfTestStoredHardFailure( void );
+
 // Hold the finished result on the breadboard LEDs until any human input
 // (probe button, encoder click/turn, or a serial byte), then restart.
 void selfTestWaitForInputThenReset( void );
@@ -50,7 +55,9 @@ void selfTestWaitForInputThenReset( void );
 // Same hold-for-input, but WITHOUT the restart - nextWhat names what the
 // touch will do (e.g. "start probe pad calibration"). The first-start flow
 // uses it to chain into the interactive pad calibration before resetting.
-void selfTestWaitForInput( const char* nextWhat );
+// Returns true when a human touched something, false when timeoutMs elapsed.
+// 0 (the default) waits forever, which is what the manual apps want.
+bool selfTestWaitForInput( const char* nextWhat, unsigned long timeoutMs = 0 );
 
 // Remove the self-test result overlay from the breadboard LEDs.
 void selfTestClearOverlay( void );

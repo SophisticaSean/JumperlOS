@@ -959,6 +959,18 @@ menu:
         // (deleted inside, so the overlay clears on the next reset).
         selfTestShowSavedResultIfPending( );
 
+        // A board that failed its own crossbar / tip-voltage / PSRAM /
+        // peripheral test must not come up energized re-applying slot 0 - the
+        // self-test teardown restores the SAVED rail voltages. probe_cable
+        // alone is the normal headless case and is allowed through.
+        if ( selfTestStoredHardFailure( ) ) {
+            Serial.println( "\n\rSELF TEST FAILED (not just the probe) - DACs parked at 0 V and the saved\n\r"
+                            "netlist is NOT applied. See /selftest.json; fix the board before using it." );
+            for ( int d = 0; d <= 3; d++ )
+                setDacByNumber( d, 0.0f, 0 );
+            globalState.clearAllConnections( );
+        }
+
         printColorJogoSmall( );
         // If the previous run ended in a HardFault, say so right here - once -
         // so a crash leaves a trail instead of a mystery reboot.

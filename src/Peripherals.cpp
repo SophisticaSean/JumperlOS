@@ -1269,6 +1269,18 @@ void initINA219( void ) {
 
 void setDacByNumber( int dac, float voltage, int save, int saveEEPROM,
                      bool checkProbePower ) {
+    // config.dacs.limit_min/limit_max are documented as "the highest voltage the
+    // DACs and rails can be set to", but until now only the clickwheel menu and
+    // the Wokwi parser enforced them - dac_set() from MicroPython/exec, and every
+    // other caller, drove the buffers unclamped. One clamp here covers them all.
+    float limited = constrain( voltage, jumperlessConfig.dacs.limit_min,
+                               jumperlessConfig.dacs.limit_max );
+    if ( limited != voltage ) {
+        Serial.printf( "DAC %d: %.2f V is outside the configured limit (%.2f..%.2f V) - using %.2f V\n\r",
+                       dac, voltage, jumperlessConfig.dacs.limit_min,
+                       jumperlessConfig.dacs.limit_max, limited );
+        voltage = limited;
+    }
     switch ( dac ) {
     case 0:
         setDac0voltage( voltage, save, saveEEPROM, checkProbePower );

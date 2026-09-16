@@ -625,7 +625,9 @@ void fastRefresh(int ledShowOption) {
   refreshLocalInProgress = true;
   
   // Performance profiling (set PROFILE_FAST_REFRESH = 1 to enable)
-  #define PROFILE_FAST_REFRESH 0
+  #ifndef PROFILE_FAST_REFRESH
+  #define PROFILE_FAST_REFRESH 0   // -DPROFILE_FAST_REFRESH=1 from the build to turn it on
+  #endif
   unsigned long startTime = micros();
   unsigned long stepTime = startTime;
   
