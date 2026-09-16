@@ -1344,6 +1344,23 @@ void assignNetColors(int preview) {
       return;
     }
 
+    // A custom colour wins over the rail table. Nets 1-5 (GND, the rails, the
+    // DACs) used to take this function unconditionally, so set_net_color(1,...)
+    // was stored by States.cpp and never shown. Only the breadboard ROWS routed
+    // into the net change: lightUpRail() picks from railColorsV5[] by voltage
+    // and never reads netColors, and slots 2-5 are live level indicators, so a
+    // custom colour there freezes the indicator until removeNetColor().
+    {
+      rgbColor customColor;
+      uint32_t customRaw;
+      char customName[32];
+      if (globalState.display.getNetColor(netIdx, customColor, customRaw, customName)) {
+        netColors[netIdx] = customColor;
+        globalState.connections.nets[netIdx].color = customColor;
+        return;
+      }
+    }
+
     // if (globalState.connections.nets[netIdx].machine == true) {
     //   rgbColor specialNetRgb = unpackRgb(rawSpecialNetColors[slot]);
     //   globalState.connections.nets[netIdx].color = specialNetRgb;
