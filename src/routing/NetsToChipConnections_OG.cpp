@@ -3227,7 +3227,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
                                 Serial.print(" \n\r");
                             }
                         }
-                        break;
+                        continue;   // L.Y[bb] taken or no free lane: try the next hop chip (a break here only ever tried A)
                     }
 
                     int xMapBB = xMapForChipLane0(path[i].chip[0], bb);
@@ -4530,7 +4530,7 @@ void resolveAltPaths(int allowStacking, int powerOnly, int noOrOnlyDuplicates, i
 
                                 path[i].x[0] = xMapForNode(path[i].node1, path[i].chip[0]);
                                 path[i].x[1] = xMapForNode(path[i].node2, path[i].chip[1]);
-                                ch[path[i].chip[0]].xStatus[xMapForNode(path[i].node1, path[i].chip[0])] = path[i].net;
+                                { int xi = xMapForNode(path[i].node1, path[i].chip[0]); if (xi >= 0) ch[path[i].chip[0]].xStatus[xi] = path[i].net; }
                                 { int xi = xMapForNode(path[i].node2, path[i].chip[1]); if (xi >= 0) ch[path[i].chip[1]].xStatus[xi] = path[i].net; }
                   // Serial.print(">>>> path ");
                   // Serial.println(i);

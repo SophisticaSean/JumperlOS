@@ -14,7 +14,7 @@
 # better or worse, updates the numbers in the same commit, which makes "this
 # change does not alter routing" mechanical. The generator is an in-file
 # xorshift32, so the numbers hold on glibc, macOS and musl. Unrouted bridges
-# are lane exhaustion on the crossbar, not bugs; recorded 2026-09-16 (the nano
+# are lane exhaustion on the crossbar, not bugs; recorded 2026-09-17 (the nano
 # header is in the sweep only with OG_SWEEP_NANO=1 - see K4 in the harness).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,7 +22,7 @@ TMP=${RUNNER_TEMP:-/tmp}
 
 want() {   # $1 = og|v5, $2 = seed -> recorded per-bridge unrouted count
   case "$1-$2" in
-    og-1) echo 7429 ;; og-2) echo 7347 ;; og-7) echo 7671 ;;
+    og-1) echo 6533 ;; og-2) echo 6510 ;; og-7) echo 6807 ;;
     v5-1) echo 1752 ;; v5-2) echo 1607 ;; v5-7) echo 1664 ;;
     *) echo "no recorded value for $1 seed $2" >&2; exit 1 ;;
   esac

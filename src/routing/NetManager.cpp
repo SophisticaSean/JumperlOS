@@ -999,13 +999,14 @@ void addNodeToNet(int netToAddNode, int node) {
     }
 
   if (newNodeIndex < 0 || newNodeIndex >= MAX_NODES) {
-    // Not debug-gated: the node is in the netlist the user sees but will not
-    // be routed, and the only other trace of that is the bridge-table message.
+    // Not debug-gated: nodes[] is only the display list (routing reads the
+    // per-net bridges[]), so the node may still route but will be missing
+    // from the netlist the user sees.
     Serial.print("net ");
     Serial.print(netToAddNode);
-    Serial.print(" is full (MAX_NODES=");
+    Serial.print(" node list is full (MAX_NODES=");
     Serial.print(MAX_NODES);
-    Serial.println(") - node not added, it will NOT be routed");
+    Serial.println(") - node routes if its bridge fits, but is NOT SHOWN in the netlist");
     return;
   }
   globalState.connections.nets[netToAddNode].nodes[newNodeIndex] = node;

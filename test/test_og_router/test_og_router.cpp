@@ -329,7 +329,7 @@ int main(int argc, char** argv) {
       if (argc > 6) { debugNTCC2 = true; runCase("replay", defs, true); return 0; }
       total++;
       int sh = 0, un = 0;
-      if (!runCaseQ(defs, sh, un, t)) { fails++; if (sh) shortTrials++; if (argc > 4 && (sh || argc > 5)) { printf("seed %u trial %d FAILED:", seed, t); for (auto& d : defs) { printf(" net%d{", d.number); for (int x : d.nodes) printf("%s ", nodeName(x).c_str()); printf("}"); } printf("\n"); } }
+      if (!runCaseQ(defs, sh, un, t)) { fails++; if (sh) shortTrials++; if (argc > 4 && (sh || argc > 5)) { printf("seed %u trial %d FAILED:", seed, t); for (auto& d : defs) { printf(" net%d{", d.number); for (int x : d.nodes) printf("%s ", nodeName(x).c_str()); printf("|"); for (auto& b : d.bridges) printf(" %s-%s", nodeName(b.first).c_str(), nodeName(b.second).c_str()); printf("}"); } printf("\n"); } }
     }
     printf("random sweep seed=%u: %d/%d trials failed, %d with SHORTS; PathHealth: %ld bridges, %ld unrouted, rule == own-path truth both ways\n", seed, fails, total, shortTrials, healthBridges, healthUnrouted);
     return 0;
@@ -358,9 +358,18 @@ int main(int argc, char** argv) {
                      {7, {ADC0, 60, 2}, {{60, ADC0}, {2, ADC0}}},
                      {8, {SUP_A, 4, 58}, {{4, SUP_A}, {4, 58}}},
                      {9, {25, 50, 29, 23, 16, 52}, {{25, 50}, {25, 29}, {50, 23}, {23, 16}, {50, 52}}}}, verbose);
-  // swapDuplicateNode's L-chip arm: 5V and ADC1 in SEPARATE nets used to
-  // short through J Y0 ("ADC1 shorted to 5V").
-  fails += !runCase("Lsw: {5V,8} + {ADC1,12} (separate nets, L-chip swap)", {{6, {SUP_B, 8}, {{SUP_B, 8}}}, {7, {ADC1, 12}, {{ADC1, 12}}}}, verbose);
+  // BB->L hop loop used to `break` after the first hop chip it evaluated, so
+  // a corner path whose own Y0 was already taken only ever tried chip A:
+  // two corner nets on chip A left row 3 unrouted with B..H hops free.
+  fails += !runCase("Lhop: {2,1} + {3,31} (second corner net on the same chip needs a hop via B..H)", {{6, {2, 1}, {{2, 1}}}, {7, {3, 31}, {{3, 31}}}}, verbose);
+  // swapDuplicateNode's L-chip arm: after a node moves between L and I/J the
+  // stale Lchip flag ran chip-L hop logic against the wrong chip. Sweep trial
+  // (seed 1 #1184) that routes only with the flag recomputed after the swap.
+  fails += !runCase("Lsw: {38,60} + {2,7,1} + {GND,47,54,30,37,29} + {GPIO_0,ADC0,8,3,14,10,44,46} (L-chip swap)",
+                    {{6, {38, 60}, {{38, 60}}},
+                     {7, {2, 7, 1}, {{2, 7}, {7, 1}}},
+                     {1, {GND, 47, 54, 30, 37, 29}, {{GND, 47}, {GND, 54}, {47, 30}, {54, 37}, {GND, 29}}},
+                     {8, {RP_GPIO_0, ADC0, 8, 3, 14, 10, 44, 46}, {{RP_GPIO_0, ADC0}, {ADC0, 8}, {ADC0, 3}, {ADC0, 14}, {RP_GPIO_0, 10}, {10, 44}, {ADC0, 46}}}}, verbose);
 #if !defined(OG_JUMPERLESS)
   // Nodes the V5 crossbar does not map at all (the OG's SUPPLY_3V3/5V,
   // RP_GPIO_0, TOP_RAIL_GND): those reach the lookups with chip -1. The router
@@ -660,7 +669,7 @@ int main(int argc, char** argv) {
   {
     int sh = 0, un = 0; runCaseQ({{6, {ADC1, NANO_D0, 9}, {{ADC1, NANO_D0}, {9, NANO_D0}}}, {7, {NANO_D4, 49, 11, 57, 4}, {{49, NANO_D4}, {11, NANO_D4}, {11, 57}, {4, 49}}}}, sh, un);
     bool ok = sh > 0;
-    printf("\n=== K4 (KNOWN-OPEN SHORT): {ADC1,D0,9} + {D4,49,11,57,4} (same-chip nano bounce vs alt path) ===\n  shorts=%d unrouted=%d  %s\n", sh, un, ok ? "PASS (still shorts - router bug open, see OG_SWEEP_NANO)" : "FIXED? no longer shorts - promote to a plain case and gate the nano sweep");
+    printf("\n=== K4 (KNOWN-OPEN SHORT): {ADC1,D0,9} + {D4,49,11,57,4} (same-chip nano bounce vs alt path) ===\n  shorts=%d unrouted=%d  %s\n", sh, un, ok ? "KNOWN-OPEN (still shorts, as asserted - router bug NOT fixed, see OG_SWEEP_NANO)" : "FIXED? no longer shorts - promote to a plain case and gate the nano sweep");
     fails += !ok;
   }
 #else
