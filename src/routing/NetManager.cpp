@@ -838,7 +838,9 @@ void addBridgeToNet(uint16_t netToAddBridge, int16_t node1,
   if (newBridgeIndex < 0 || newBridgeIndex >= MAX_NODES) {
     Serial.print("net ");
     Serial.print(netToAddBridge);
-    Serial.println(" bridge table full - connection listed but not tracked per-net");
+    Serial.print(" bridge table full (MAX_NODES=");
+    Serial.print(MAX_NODES);
+    Serial.println(") - connection listed but NOT routed");
     return;
   }
   globalState.connections.nets[netToAddBridge].bridges[newBridgeIndex][0] = node1;
@@ -997,11 +999,14 @@ void addNodeToNet(int netToAddNode, int node) {
     }
 
   if (newNodeIndex < 0 || newNodeIndex >= MAX_NODES) {
-    if (debugNM) {
-      Serial.print("net ");
-      Serial.print(netToAddNode);
-      Serial.println(" is full - node not added (too many rows in one net)");
-    }
+    // Not debug-gated: nodes[] is only the display list (routing reads the
+    // per-net bridges[]), so the node may still route but will be missing
+    // from the netlist the user sees.
+    Serial.print("net ");
+    Serial.print(netToAddNode);
+    Serial.print(" node list is full (MAX_NODES=");
+    Serial.print(MAX_NODES);
+    Serial.println(") - node routes if its bridge fits, but is NOT SHOWN in the netlist");
     return;
   }
   globalState.connections.nets[netToAddNode].nodes[newNodeIndex] = node;
